@@ -108,7 +108,7 @@ def allowed_file(filename):
 # ----------------------------
 # GROQ API CALL
 # ----------------------------
-def ask_groq(prompt, model="llama-3.1-70b-versatile"):
+def ask_groq(prompt, model="llama-3.1-70b"):
     """
     Call Groq API (OpenAI compatible endpoint). Returns string reply or error message.
     - Expects GROQ_API_KEY set as env var.
