@@ -1,4 +1,4 @@
 flask
-openai
 requests
-pyngrok
+pillow
+werkzeug
