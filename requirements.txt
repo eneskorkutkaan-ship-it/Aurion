@@ -1,10 +1,29 @@
+# ---------- Render uyumlu temel kurulum ----------
+pip==25.3
+setuptools>=70.0
+wheel>=0.43.0
+
+# ---------- Flask ve web sistemi ----------
 Flask==3.0.3
+Werkzeug==3.0.3
+Flask-Cors==4.0.1
+Flask-SocketIO==5.3.6
+itsdangerous==2.2.0
+Jinja2==3.1.3
+python-engineio==4.9.1
+python-socketio==5.11.3
+gunicorn==21.2.0
+
+# ---------- API ve yapay zeka bağlantıları ----------
 requests==2.31.0
-Jinja2==3.1.2
-Werkzeug==2.3.7
-itsdangerous==2.1.2
-click==8.1.7
-Pillow==9.5.0
-# DB ve yardımcılar (sqlite3 stdlib)
-# Hugging Face hub (kullanmak istersen)
-huggingface-hub==0.16.4
+huggingface_hub==0.23.4
+groq==0.5.0
+
+# ---------- Görsel işleme ----------
+Pillow==9.4.0
+
+# ---------- Opsiyonel geliştirme / güvenlik ----------
+urllib3==2.2.2
+certifi==2024.8.30
+charset-normalizer==3.3.2
+idna==3.7
