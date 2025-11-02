@@ -731,7 +731,7 @@ def api_generate_image():
         # store message log
         db = get_db()
         cur = db.cursor()
-        cur.execute("INSERT INTO messages (user_id, sender, content) VALUES (?, ?, ?)", (user["id"], "KralZeka (görsel)", f"data:image/png;base64,{b64[:180]}...")))
+        cur.execute("INSERT INTO messages (user_id, sender, content) VALUES (?, ?, ?)", (user["id"], "KralZeka (görsel)", f"data:image/png;base64,{b64[:180]}..."))
         db.commit()
         return jsonify({"image_base64": b64}), 200
     except Exception as e:
