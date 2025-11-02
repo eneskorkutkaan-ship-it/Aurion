@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}KralZeka{% endblock %}</title>
+
+    <style>
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #1a1a1a, #2a2a2a);
+            color: white;
+            margin: 0;
+            padding: 0;
+            text-align: center;
+        }
+        header {
+            background-color: #111;
+            padding: 20px;
+            font-size: 1.6em;
+            font-weight: bold;
+            letter-spacing: 1px;
+            border-bottom: 2px solid #ffcc00;
+        }
+        main {
+            padding: 40px;
+        }
+        footer {
+            background-color: #111;
+            padding: 15px;
+            border-top: 1px solid #444;
+            position: fixed;
+            bottom: 0;
+            width: 100%;
+            font-size: 0.9em;
+            color: #aaa;
+        }
+        a {
+            color: #ffcc00;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        👑 KralZeka
+    </header>
+
+    <main>
+        {% block content %}
+        <h1>🚀 KralZeka başarıyla çalışıyor!</h1>
+        <p>Flask & Render bağlantısı aktif.</p>
+        {% endblock %}
+    </main>
+
+    <footer>
+        © 2025 KralZeka.com | Geliştirici: Enes
+    </footer>
+</body>
+</html>
