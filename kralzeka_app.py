@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-KralZeka v1 - Tam sürüm (tek dosya)
-- Groq öncelikli (GROQ_API_KEY)
-- Hugging Face yedek (HF_API_KEY)
-- Admin: enes (değiştirilemez / silinemez)
-- Kullanıcı kayıt + giriş + admin panel
-- Görsel üretme (HF) ve kalite yükseltme (admin sınırsız, normal kullanıcı günde 5)
-- Admin-only kod-yazma "assistant" bölümü (isteğe göre kod üretir)
-- Tüm arayüz Türkçe. Tek dosya; SQLite DB kullanan güvenli yapı.
+KralZeka v1 - Tek dosya, SQLite, gunicorn uyumlu
+ENV:
+ - GROQ_API_KEY   (opsiyonel)
+ - HF_API_KEY     (opsiyonel)
+ - SECRET_KEY     (zorunlu değil; yoksa rastgele oluşturulur)
+NOTLAR:
+ - .env / platform env sadece ANAHTARLARI içermeli. (SECRET_KEY dahil)
+ - İlk admin: kullanıcı adı: enes , şifre: enes1357924680 (korunur)
+ - Groq -> öncelik, HF -> yedek (metin/görsel)
 """
 
 import os
 import sqlite3
 import json
-import time
 import uuid
 import functools
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 from flask import (
     Flask, request, redirect, url_for, session, g,
-    render_template_string, jsonify, abort, send_file
+    render_template_string, jsonify
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 import requests
-from io import BytesIO
 import base64
 import logging
 
@@ -35,26 +34,19 @@ DB_PATH = os.environ.get("KRALZEKA_DB", os.path.join(BASE_DIR, "kralzeka.db"))
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 HF_API_KEY = os.environ.get("HF_API_KEY", "").strip()
-SECRET_KEY = os.environ.get("SECRET_KEY", os.environ.get("FLASK_SECRET_KEY", str(uuid.uuid4())))
-if not SECRET_KEY:
-    SECRET_KEY = str(uuid.uuid4())
+SECRET_KEY = os.environ.get("SECRET_KEY", "") or str(uuid.uuid4())
 
-# modeli kod içinde belirle (kullanıcı değiştirmeyecek)
-DEFAULT_GROQ_MODEL = "llama-3.1-70b"   # öncelikli (sunucu erişimi varsa)
-DEFAULT_HF_TEXT_MODEL = "meta-llama/Llama-2-7b-chat-hf"  # fallback text model
-DEFAULT_HF_IMAGE_MODEL = "stabilityai/stable-diffusion-xl"  # örnek
+DEFAULT_GROQ_MODEL = "llama-3.1-70b"
+DEFAULT_HF_TEXT_MODEL = "meta-llama/Llama-2-7b-chat-hf"
+DEFAULT_HF_IMAGE_MODEL = "stabilityai/stable-diffusion-xl"
 
-# Limits / özellikler
-IMAGE_DAILY_LIMIT = 5  # normal kullanıcı için günlük kalite yükseltme sınırlaması
+IMAGE_DAILY_LIMIT = 5
 ADMIN_USERNAME = "enes"
-ADMIN_PASSWORD = "enes1357924680"  # ilk admin (db'ye eklenecek, kodda salt okunur kurallar var)
+ADMIN_PASSWORD = "enes1357924680"
 
-# güvenlik - CORS/CSRF vb production'da eklenmeli (basit demo için minimum)
-# logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kralzeka")
 
-# Flask app
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
@@ -73,7 +65,6 @@ def get_db():
 def init_db(db_conn=None, force=False):
     db = db_conn or sqlite3.connect(DB_PATH, check_same_thread=False)
     cur = db.cursor()
-    # users: id, username unique, password_hash, is_admin, created_at
     cur.executescript("""
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS users (
@@ -86,7 +77,7 @@ def init_db(db_conn=None, force=False):
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
-        sender TEXT, -- 'user' or 'kralzeka' or 'system'
+        sender TEXT,
         content TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
@@ -107,7 +98,7 @@ def init_db(db_conn=None, force=False):
     );
     """)
     db.commit()
-    # ensure initial admin exists (immutable)
+    # create initial admin if missing
     try:
         cur.execute("SELECT id FROM users WHERE username = ?", (ADMIN_USERNAME,))
         if not cur.fetchone():
@@ -117,23 +108,23 @@ def init_db(db_conn=None, force=False):
             )
             db.commit()
             logger.info("İlk admin oluşturuldu: %s", ADMIN_USERNAME)
-    except Exception as e:
-        logger.exception("init_db error: %s", e)
+    except Exception:
+        logger.exception("init_db error")
 
-def close_db(e=None):
+@app.teardown_appcontext
+def close_db(exception):
     db = getattr(g, "_db", None)
     if db is not None:
         db.close()
         g._db = None
-
-app.teardown_appcontext(close_db)
 
 # ========== YARDIMCI FONKSİYONLAR ==========
 def log_event(level: str, message: str, meta: Optional[dict] = None):
     try:
         db = get_db()
         cur = db.cursor()
-        cur.execute("INSERT INTO logs (level, message, meta) VALUES (?, ?, ?)", (level, message, json.dumps(meta or {})))
+        cur.execute("INSERT INTO logs (level, message, meta) VALUES (?, ?, ?)",
+                    (level, message, json.dumps(meta or {})))
         db.commit()
     except Exception:
         logger.exception("log_event failed")
@@ -160,7 +151,6 @@ def require_login(fn):
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
             return redirect(url_for("login", next=request.path))
-        # load user
         db = get_db()
         cur = db.cursor()
         cur.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],))
@@ -188,112 +178,65 @@ def require_admin(fn):
     return wrapper
 
 def protected_admin_modify(target_username: str, acting_admin: str):
-    """
-    İlk admini (enes) demote/silme gibi işlemleri engeller.
-    Eğer bir admin 'enes' üzerinde işlem yapmaya çalışırsa, bunu logla ve uyar.
-    """
     if target_username == ADMIN_USERNAME:
-        # log the attempt
-        log_event("WARN", f"Admin yetki değişikliği denemesi: {acting_admin} -> {target_username}", {"actor": acting_admin, "target": target_username})
+        log_event("WARN", f"Admin değişikliği denemesi: {acting_admin} -> {target_username}",
+                  {"actor": acting_admin, "target": target_username})
         return False
     return True
 
-def format_time(ts=None):
-    return (ts or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%S")
-
-# ========== AI BACKENDS ==========
+# ========== AI BACKENDS (basit, güvenlik ile) ==========
 def call_groq_chat(prompt: str, model=DEFAULT_GROQ_MODEL):
-    """
-    Basit istek: Groq API benzeri bir endpoint çağrısı.
-    Bu örnek kodda, Groq erişimi yoksa hata fırlatır; üst katman fallback yapar.
-    """
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ key yok")
-    url = "https://api.groq.com/openai/v1/chat/completions"  # örnek (kendi endpoint'ini kullan)
+    url = "https://api.groq.com/openai/v1/chat/completions"  # örnek
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    data = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1024,
-    }
-    try:
-        r = requests.post(url, headers=headers, json=data, timeout=30)
-        r.raise_for_status()
-        resp = r.json()
-        # farklı servislerin cevap formatı farklı olabilir; esnek davran
-        if "choices" in resp and resp["choices"]:
-            return resp["choices"][0].get("message", {}).get("content") or resp["choices"][0].get("text")
-        # fallback if structure differs
-        return resp.get("output_text") or json.dumps(resp)
-    except Exception as e:
-        logger.exception("Groq çağrısı başarısız: %s", e)
-        raise
+    data = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 1024}
+    r = requests.post(url, headers=headers, json=data, timeout=30)
+    r.raise_for_status()
+    resp = r.json()
+    if "choices" in resp and resp["choices"]:
+        return resp["choices"][0].get("message", {}).get("content") or resp["choices"][0].get("text")
+    return resp.get("output_text") or json.dumps(resp)
 
 def call_hf_text(prompt: str, model: str = DEFAULT_HF_TEXT_MODEL):
-    """
-    Hugging Face text generation inference API çağrısı.
-    """
     if not HF_API_KEY:
         raise RuntimeError("HF key yok")
     url = f"https://api-inference.huggingface.co/models/{model}"
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     payload = {"inputs": prompt, "options": {"wait_for_model": True}}
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
-        r.raise_for_status()
-        resp = r.json()
-        if isinstance(resp, dict) and "error" in resp:
-            raise RuntimeError(resp["error"])
-        # HF often returns a list of dicts with 'generated_text'
-        if isinstance(resp, list) and resp and "generated_text" in resp[0]:
-            return resp[0]["generated_text"]
-        # else if string
-        if isinstance(resp, str):
-            return resp
-        # else dump
-        return json.dumps(resp)
-    except Exception:
-        logger.exception("HF text generation failed")
-        raise
+    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    r.raise_for_status()
+    resp = r.json()
+    if isinstance(resp, dict) and "error" in resp:
+        raise RuntimeError(resp["error"])
+    if isinstance(resp, list) and resp and "generated_text" in resp[0]:
+        return resp[0]["generated_text"]
+    if isinstance(resp, str):
+        return resp
+    return json.dumps(resp)
 
-def generate_image_hf(prompt: str, model: str = DEFAULT_HF_IMAGE_MODEL, size: str = "1024x1024"):
-    """
-    Basit HF image generation call; base64 PNG returned.
-    """
+def generate_image_hf(prompt: str, model: str = DEFAULT_HF_IMAGE_MODEL):
     if not HF_API_KEY:
         raise RuntimeError("HF key yok")
     url = f"https://api-inference.huggingface.co/models/{model}"
     headers = {"Authorization": f"Bearer {HF_API_KEY}", "Accept": "application/json"}
     payload = {"inputs": prompt, "options": {"wait_for_model": True}}
-    # Some HF image models expect different payloads; attempt general call
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=120)
-        r.raise_for_status()
-        content_type = r.headers.get("Content-Type", "")
-        if "application/json" in content_type:
-            data = r.json()
-            # If HF returns base64 image or url
-            if isinstance(data, dict) and "image_base64" in data:
-                return base64.b64decode(data["image_base64"])
-            if isinstance(data, dict) and "generated_image" in data:
-                return base64.b64decode(data["generated_image"])
-            # sometimes HF returns bytes directly (rare)
-            # else if 'error' in data raise
-            if "error" in data:
-                raise RuntimeError(data["error"])
-            # otherwise dump
-            raise RuntimeError("HF image model returned unexpected JSON")
-        else:
-            # raw bytes (png/jpg)
-            return r.content
-    except Exception:
-        logger.exception("HF image generation failed")
-        raise
+    r = requests.post(url, headers=headers, json=payload, timeout=120)
+    r.raise_for_status()
+    content_type = r.headers.get("Content-Type", "")
+    if "application/json" in content_type:
+        data = r.json()
+        if isinstance(data, dict) and "image_base64" in data:
+            return base64.b64decode(data["image_base64"])
+        if isinstance(data, dict) and "generated_image" in data:
+            return base64.b64decode(data["generated_image"])
+        if "error" in data:
+            raise RuntimeError(data["error"])
+        raise RuntimeError("HF image model returned unexpected JSON")
+    else:
+        return r.content
 
 def ai_chat(prompt: str) -> str:
-    """
-    Öncelikle Groq dene; başarısız olursa HF text fallback.
-    """
     try:
         if GROQ_API_KEY:
             try:
@@ -302,7 +245,6 @@ def ai_chat(prompt: str) -> str:
                     return out
             except Exception:
                 logger.warning("Groq başarısız, HF'e düşülüyor.")
-        # fallback
         if HF_API_KEY:
             return call_hf_text(prompt)
         raise RuntimeError("Hiçbir model yapılamıyor (GROQ/HF anahtarları yok veya hata).")
@@ -310,7 +252,7 @@ def ai_chat(prompt: str) -> str:
         logger.exception("ai_chat exception")
         return f"KralZeka Hata: {str(e)}"
 
-# ========== UTIL: LIMITLER ==========
+# ========== IMAGE USAGE ==========
 def get_image_usage_for_today(user_id: int):
     db = get_db()
     cur = db.cursor()
@@ -331,7 +273,7 @@ def increment_image_usage(user_id: int, amount: int = 1):
         cur.execute("INSERT INTO image_usage (user_id, usage_date, count) VALUES (?, ?, ?)", (user_id, today, amount))
     db.commit()
 
-# ========== ROUTES & UI ==========
+# ========== TEMPLATELER (herhangi bir TemplateNotFound hatasını önlemek için inline olarak ekliyoruz) ==========
 BASE_HTML = """
 <!doctype html>
 <html lang="tr">
@@ -341,7 +283,7 @@ BASE_HTML = """
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     body{background:#071018;color:#d8efe9;font-family:Inter,Segoe UI,Arial;padding:20px}
-    .wrap{max-width:900px;margin:0 auto}
+    .wrap{max-width:980px;margin:0 auto}
     header{display:flex;justify-content:space-between;align-items:center}
     h1{margin:0;font-size:28px}
     .card{background:rgba(0,0,0,0.45);padding:18px;border-radius:10px;box-shadow:0 6px 30px rgba(0,0,0,0.6);margin-top:18px}
@@ -355,6 +297,8 @@ BASE_HTML = """
     footer{margin-top:40px;text-align:center;color:#6c9b9b}
     .small{font-size:13px;color:#9dbdbd}
     .danger{color:#ffd2d2}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid rgba(255,255,255,0.03);text-align:left}
   </style>
 </head>
 <body>
@@ -476,7 +420,7 @@ ADMIN_HTML = """
     <div class="small">Kullanıcı yönetimi, limitler, kod-yazma bölümü (sadece adminlere özel), günlük kullanım yönetimi.</div>
     <hr>
     <h4>Kullanıcılar</h4>
-    <table style="width:100%" class="small">
+    <table class="small">
       <tr><th>Kullanıcı</th><th>Admin</th><th>Oluşturma</th><th>İşlemler</th></tr>
       {% for u in users %}
         <tr>
@@ -529,8 +473,8 @@ ERROR_500 = """
 {% endblock %}
 """
 
-# register templates
-app.jinja_loader.mapping = {
+# register templates for render_template_string usage
+TEMPLATES = {
     'base': BASE_HTML,
     'index.html': INDEX_HTML,
     'login.html': LOGIN_HTML,
@@ -552,7 +496,7 @@ def index():
     cur = db.cursor()
     cur.execute("SELECT * FROM messages ORDER BY created_at DESC LIMIT 20")
     msgs = cur.fetchall()
-    return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'index.html')[0],
+    return render_template_string(TEMPLATES['index.html'], base=TEMPLATES['base'],
                                   user=user, messages=msgs, image_limit=IMAGE_DAILY_LIMIT)
 
 @app.route("/register", methods=["GET", "POST"])
@@ -562,19 +506,22 @@ def register():
         password = request.form.get("password", "")
         password2 = request.form.get("password2", "")
         if not username or not password:
-            return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'register.html')[0], error="Alanları doldurun", admin_username=ADMIN_USERNAME)
+            return render_template_string(TEMPLATES['register.html'], base=TEMPLATES['base'],
+                                          error="Alanları doldurun", admin_username=ADMIN_USERNAME)
         if password != password2:
-            return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'register.html')[0], error="Parolalar eşleşmiyor", admin_username=ADMIN_USERNAME)
+            return render_template_string(TEMPLATES['register.html'], base=TEMPLATES['base'],
+                                          error="Parolalar eşleşmiyor", admin_username=ADMIN_USERNAME)
         if get_user_by_username(username):
-            return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'register.html')[0], error="Kullanıcı adı alınmış", admin_username=ADMIN_USERNAME)
+            return render_template_string(TEMPLATES['register.html'], base=TEMPLATES['base'],
+                                          error="Kullanıcı adı alınmış", admin_username=ADMIN_USERNAME)
         uid = create_user(username, password, 0)
         if not uid:
-            return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'register.html')[0], error="Kayıt başarısız", admin_username=ADMIN_USERNAME)
+            return render_template_string(TEMPLATES['register.html'], base=TEMPLATES['base'],
+                                          error="Kayıt başarısız", admin_username=ADMIN_USERNAME)
         log_event("INFO", f"Kayıt: {username}")
-        # auto login
         session["user_id"] = uid
         return redirect(url_for("index"))
-    return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'register.html')[0], error=None, admin_username=ADMIN_USERNAME)
+    return render_template_string(TEMPLATES['register.html'], base=TEMPLATES['base'], error=None, admin_username=ADMIN_USERNAME)
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -583,11 +530,11 @@ def login():
         password = request.form.get("password", "")
         user = get_user_by_username(username)
         if not user or not check_password_hash(user["password_hash"], password):
-            return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'login.html')[0], error="Kullanıcı adı veya şifre hatalı")
+            return render_template_string(TEMPLATES['login.html'], base=TEMPLATES['base'], error="Kullanıcı adı veya şifre hatalı")
         session["user_id"] = user["id"]
         log_event("INFO", f"Giriş: {username}")
         return redirect(url_for("index"))
-    return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'login.html')[0], error=None)
+    return render_template_string(TEMPLATES['login.html'], base=TEMPLATES['base'], error=None)
 
 @app.route("/logout")
 def logout():
@@ -601,20 +548,17 @@ def chat():
     if not prompt:
         return redirect(url_for("index"))
     user = g.user
-    # save user message
     db = get_db()
     cur = db.cursor()
-    cur.execute("INSERT INTO messages (user_id, sender, content) VALUES (?, ?, ?)", (user["id"], user["username"], prompt))
+    cur.execute("INSERT INTO messages (user_id, sender, content) VALUES (?, ?, ?)",
+                (user["id"], user["username"], prompt))
     db.commit()
-
-    # process prompt for certain modes (if starts with "mod:..."), simple example
     try:
-        # If user requests "ödev" mode keywords, we can augment prompt
         response_text = ai_chat(prompt)
     except Exception as e:
         response_text = f"Hata: {str(e)}"
-    # store assistant response
-    cur.execute("INSERT INTO messages (user_id, sender, content) VALUES (?, ?, ?)", (user["id"], "KralZeka", response_text))
+    cur.execute("INSERT INTO messages (user_id, sender, content) VALUES (?, ?, ?)",
+                (user["id"], "KralZeka", response_text))
     db.commit()
     return redirect(url_for("index"))
 
@@ -627,7 +571,7 @@ def feature_request():
         log_event("FEATURE", txt, {"tag": tag, "user": g.user["username"]})
     return redirect(url_for("index"))
 
-# ========== Admin routes ==========
+# ========== ADMIN ==========
 @app.route("/admin", methods=["GET"])
 @require_admin
 def admin_panel():
@@ -637,8 +581,7 @@ def admin_panel():
     users = cur.fetchall()
     cur.execute("SELECT level, message, meta, created_at FROM logs ORDER BY id DESC LIMIT 100")
     logs = cur.fetchall()
-    return render_template_string(app.jinja_loader.get_source(app.jinja_env, 'admin.html')[0],
-                                  users=users, logs=logs, admin_username=ADMIN_USERNAME)
+    return render_template_string(TEMPLATES['admin.html'], base=TEMPLATES['base'], users=users, logs=logs, admin_username=ADMIN_USERNAME, user=g.user)
 
 @app.route("/admin/make_admin/<int:user_id>", methods=["POST"])
 @require_admin
@@ -697,17 +640,14 @@ def admin_code_tool():
     prompt = request.form.get("prompt", "").strip()
     if not prompt:
         return redirect(url_for("admin_panel"))
-    # For admin-only code generation: ask AI (Groq/HF)
     try:
-        # simple guard: require explicit confirmation? We use direct generation as requested
         ai_response = ai_chat(f"Admin kod üretme asistanı: {prompt}")
     except Exception as e:
         ai_response = f"Hata: {e}"
-    # log and show in admin logs
     log_event("CODE", ai_response, {"admin": g.user["username"], "prompt": prompt})
     return redirect(url_for("admin_panel"))
 
-# ========== Image generation endpoint ==========
+# ========== IMAGE API ==========
 @app.route("/api/generate_image", methods=["POST"])
 @require_login
 def api_generate_image():
@@ -716,44 +656,40 @@ def api_generate_image():
     if not prompt:
         return jsonify({"error": "prompt gerekli"}), 400
     user = g.user
-    # limit check (if not admin)
     if not user["is_admin"]:
         used = get_image_usage_for_today(user["id"])
         if used >= IMAGE_DAILY_LIMIT:
             return jsonify({"error": f"Günlük limit aşıldı ({IMAGE_DAILY_LIMIT})"}), 403
-    # try HF
     try:
         img_bytes = generate_image_hf(prompt)
-        # increment usage
         if not user["is_admin"]:
             increment_image_usage(user["id"], 1)
         b64 = base64.b64encode(img_bytes).decode("utf-8")
-        # store message log
+        # store truncated in messages to avoid DB overflow
         db = get_db()
         cur = db.cursor()
-        cur.execute("INSERT INTO messages (user_id, sender, content) VALUES (?, ?, ?)", (user["id"], "KralZeka (görsel)", f"data:image/png;base64,{b64[:180]}..."))
+        preview = f"data:image/png;base64,{b64[:180]}..."
+        cur.execute("INSERT INTO messages (user_id, sender, content) VALUES (?, ?, ?)",
+                    (user["id"], "KralZeka (görsel)", preview))
         db.commit()
         return jsonify({"image_base64": b64}), 200
     except Exception as e:
         logger.exception("image generation error")
         return jsonify({"error": f"Görsel üretilemedi: {str(e)}"}), 500
 
-# ========== Error handling ==========
+# ========== HATA YAKALAMA ==========
 @app.errorhandler(500)
 def handle_500(e):
     try:
         log_event("ERROR", str(e), {"path": request.path})
     except Exception:
-        pass
-    return render_template_string(app.jinja_loader.get_source(app.jinja_env, '500.html')[0], user=None), 500
+        logger.exception("log_event failed while handling 500")
+    return render_template_string(TEMPLATES['500.html'], base=TEMPLATES['base'], user=None), 500
 
-# ========== Başlat / init ==========
+# ========== BAŞLAT ==========
 def start_app():
-    # Ensure DB exists & initial admin present
     init_db()
     logger.info("KralZeka v1 starting...")
-    # Do not run Flask built-in server in production; use gunicorn as start command.
-    # But allow local debug run
     if os.environ.get("FLASK_RUN_LOCAL", "").lower() in ("1", "true"):
         app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
 
