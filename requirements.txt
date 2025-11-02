@@ -2,6 +2,6 @@ Flask>=2.2
 Flask-SQLAlchemy
 requests
 Pillow
+reportlab
 gunicorn
 werkzeug
-reportlab
