@@ -1,396 +1,446 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-KralZeka v1 - Tam özellikli tek-dosya Flask uygulaması
-Çalıştırma: gunicorn kralzeka_app:app
-Render start command: gunicorn kralzeka_app:app
-Environment variables required:
- - HF_API_KEY      (Hugging Face API key)  -- fallback for models
- - GROQ_API_KEY    (Groq API key)          -- primary model usage (if available)
- - ADMIN_KEY       (secret admin key used to protect admin-only endpoints/actions)
- - FLASK_SECRET    (Flask secret key, optional)
+KralZeka v1 - Tam sürüm Flask uygulaması (tek dosya).
+- Groq öncelikli, Hugging Face fallback olarak kullanılır.
+- DB: SQLite (local file: kralzeka.db)
+- Start with gunicorn: gunicorn kralzeka_app:app
+- Env vars:
+    - FLASK_SECRET (string)  -> flask secret key
+    - HF_API_KEY (string)    -> Hugging Face token (opsiyonel ama gerekli özellikler için)
+    - GROQ_API_KEY (string)  -> Groq token (opsiyonel)
+    - INITIAL_ADMIN_PASSWORD (optional) -> override default admin password
 """
 
 import os
-import time
-import json
 import sqlite3
-import threading
+import json
+import time
+import uuid
+import base64
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from functools import wraps
 
 from flask import (
-    Flask, g, render_template_string, request, redirect, url_for,
-    session, jsonify, send_from_directory, abort, flash
+    Flask, request, session, redirect, url_for,
+    render_template_string, send_from_directory, flash, jsonify
 )
+from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
+
 import requests
 
-# -------------------- Ayarlar --------------------
+# --- CONFIG ---
 APP_NAME = "KralZeka v1"
-DB_PATH = "kralzeka.db"
-UPLOAD_FOLDER = "uploads"
-ALLOWED_IMAGE_EXT = {"png", "jpg", "jpeg", "webp"}
-MAX_DAILY_QUALITY_USES = 5  # normal kullanıcı günlük kalite yükseltme limiti
+DB_PATH = os.environ.get("KRALZEKA_DB", "kralzeka.db")
+UPLOAD_FOLDER = os.environ.get("KRALZEKA_UPLOADS", "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-HF_API_KEY = os.environ.get("HF_API_KEY", "")    # set in Render -> Environment
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")  # primary model key
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "enes1357924680")  # default first admin (enes)
-FLASK_SECRET = os.environ.get("FLASK_SECRET", "change_me_please")
-PORT = int(os.environ.get("PORT", 10000))
+HF_API_KEY = os.environ.get("HF_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+FLASK_SECRET = os.environ.get("FLASK_SECRET", "please-set-a-secret")
+# initial admin password override
+INITIAL_ADMIN_PASSWORD = os.environ.get("INITIAL_ADMIN_PASSWORD", "enes1357924680")
 
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# daily image upscale limit for normal users
+DEFAULT_DAILY_UPSCALE_LIMIT = 5
 
-# -------------------- Flask app --------------------
-app = Flask(__name__, static_folder="static", template_folder="templates")
+# Allowed image extensions
+ALLOWED_EXT = {"png", "jpg", "jpeg", "webp"}
+
+# --- flask app ---
+app = Flask(__name__)
 app.secret_key = FLASK_SECRET
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB upload limit
 
-# -------------------- DB helpers --------------------
-def get_db():
-    db = getattr(g, "_db", None)
-    if db is None:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        g._db = conn
-    return g._db
+# --- Utilities ---
+def log(msg):
+    ts = datetime.utcnow().isoformat()
+    print(f"[{ts}] {msg}", flush=True)
 
-def close_db(e=None):
-    db = getattr(g, "_db", None)
-    if db is not None:
-        db.close()
-
-app.teardown_appcontext(close_db)
+def get_db_conn():
+    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db(force=False):
-    db = get_db()
-    if force:
-        try:
-            db.execute("DROP TABLE IF EXISTS users")
-            db.execute("DROP TABLE IF EXISTS messages")
-            db.execute("DROP TABLE IF EXISTS limits")
-            db.commit()
-        except Exception:
-            pass
-    # create tables if not exist
-    db.executescript("""
+    """Initialize the database. Safe to call multiple times."""
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.executescript("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
         is_admin INTEGER DEFAULT 0,
-        created_at TEXT
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        daily_upscale_count INTEGER DEFAULT 0,
+        daily_upscale_date DATE
     );
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
-        role TEXT,
+        role TEXT, -- 'user' or 'assistant' or 'system'
         content TEXT,
-        timestamp TEXT
-    );
-    CREATE TABLE IF NOT EXISTS limits (
-        user_id INTEGER PRIMARY KEY,
-        quality_used INTEGER DEFAULT 0,
-        last_reset TEXT
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS admin_actions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        admin_user INTEGER,
+        admin_id INTEGER,
         action TEXT,
-        target_user INTEGER,
-        timestamp TEXT
+        meta TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS features (
+        key TEXT PRIMARY KEY,
+        value TEXT
     );
     """)
-    db.commit()
+    conn.commit()
     # ensure initial admin exists
-    cur = db.execute("SELECT id FROM users WHERE username = ?", ("enes",))
-    if cur.fetchone() is None:
-        db.execute(
-            "INSERT INTO users (username,password,is_admin,created_at) VALUES (?,?,?,?)",
-            ("enes", ADMIN_KEY, 1, datetime.utcnow().isoformat())
-        )
-        db.commit()
+    cur.execute("SELECT id FROM users WHERE username = ?", ("enes",))
+    r = cur.fetchone()
+    if not r or force:
+        pwd = INITIAL_ADMIN_PASSWORD or "enes1357924680"
+        phash = generate_password_hash(pwd)
+        try:
+            cur.execute("INSERT OR REPLACE INTO users (username, password_hash, is_admin, daily_upscale_count, daily_upscale_date) VALUES (?,?,?,?,?)",
+                        ("enes", phash, 1, 0, date.today().isoformat()))
+            conn.commit()
+            log("Initial admin 'enes' created/updated.")
+        except Exception as e:
+            log("Could not insert admin user: " + str(e))
+    conn.close()
 
-# init DB at import time (safe)
-with app.app_context():
-    init_db(force=False)
+# call init at import time safely
+try:
+    init_db()
+except Exception:
+    log("DB init error:\n" + traceback.format_exc())
 
-# -------------------- Auth helpers --------------------
+# --- Auth helpers ---
 def login_user(username):
     session['username'] = username
 
 def logout_user():
     session.pop('username', None)
 
-def current_user():
+def get_current_user():
     username = session.get('username')
     if not username:
         return None
-    db = get_db()
-    cur = db.execute("SELECT * FROM users WHERE username = ?", (username,))
-    return cur.fetchone()
-
-def admin_required(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        user = current_user()
-        if not user or user["is_admin"] != 1:
-            return jsonify({"error":"Bu işlem için admin yetkisi gerekiyor."}), 403
-        return fn(*args, **kwargs)
-    return wrapper
-
-# -------------------- Rate limit / limits --------------------
-def check_quality_limit(user_id):
-    db = get_db()
-    cur = db.execute("SELECT quality_used, last_reset FROM limits WHERE user_id = ?", (user_id,))
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE username = ?", (username,))
     row = cur.fetchone()
-    today = datetime.utcnow().date()
-    if not row:
-        # insert
-        db.execute("INSERT OR REPLACE INTO limits (user_id, quality_used, last_reset) VALUES (?,?,?)",
-                   (user_id, 0, today.isoformat()))
-        db.commit()
-        return True, 0
-    used = row["quality_used"]
-    last_reset = datetime.fromisoformat(row["last_reset"]).date() if row["last_reset"] else today
-    if last_reset < today:
-        db.execute("UPDATE limits SET quality_used=0, last_reset=? WHERE user_id=?", (today.isoformat(), user_id))
-        db.commit()
-        return True, 0
-    return (used < MAX_DAILY_QUALITY_USES), used
+    conn.close()
+    return dict(row) if row else None
 
-def increment_quality(user_id):
-    db = get_db()
-    cur = db.execute("SELECT quality_used FROM limits WHERE user_id = ?", (user_id,))
-    row = cur.fetchone()
-    if not row:
-        db.execute("INSERT INTO limits (user_id, quality_used, last_reset) VALUES (?,?,?)",
-                   (user_id, 1, datetime.utcnow().date().isoformat()))
-    else:
-        db.execute("UPDATE limits SET quality_used = quality_used + 1 WHERE user_id = ?", (user_id,))
-    db.commit()
+def login_required(f):
+    @wraps(f)
+    def _wrap(*args, **kwargs):
+        if not session.get('username'):
+            return redirect(url_for('index'))
+        return f(*args, **kwargs)
+    return _wrap
 
-# -------------------- Utility / Logging --------------------
-def log_message(user_id, role, content):
-    db = get_db()
-    db.execute(
-        "INSERT INTO messages (user_id, role, content, timestamp) VALUES (?,?,?,?)",
-        (user_id, role, content, datetime.utcnow().isoformat())
-    )
-    db.commit()
+def admin_required(f):
+    @wraps(f)
+    def _wrap(*args, **kwargs):
+        user = get_current_user()
+        if not user or not user.get('is_admin'):
+            flash("Bu bölüm yalnızca adminlere özeldir.", "error")
+            return redirect(url_for('index'))
+        return f(*args, **kwargs)
+    return _wrap
 
-def record_admin_action(admin_user, action, target_user=None):
-    db = get_db()
-    db.execute("INSERT INTO admin_actions (admin_user, action, target_user, timestamp) VALUES (?,?,?,?)",
-               (admin_user, action, target_user, datetime.utcnow().isoformat()))
-    db.commit()
+# --- Simple feature store ---
+def set_feature(key, value):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO features (key, value) VALUES (?,?)", (key, json.dumps(value)))
+    conn.commit()
+    conn.close()
 
-# -------------------- Model wrappers --------------------
-def call_groq_model(prompt):
-    """
-    Call Groq API (primary). Return string or raise Exception on failure.
-    Note: fill GROQ_API_KEY in env.
-    """
-    key = GROQ_API_KEY
-    if not key:
-        raise RuntimeError("Groq API key yok")
-    try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        data = {
-            "model": "gpt-4o-mini" if False else "llama-3-8-8192",  # placeholder — actual model must match Groq offering
-            "messages": [{"role":"user","content": prompt}],
-            "max_tokens": 800
-        }
-        r = requests.post(url, headers=headers, json=data, timeout=30)
-        r.raise_for_status()
-        js = r.json()
-        # Attempt to extract text
-        if "choices" in js and len(js["choices"])>0:
-            content = js["choices"][0].get("message", {}).get("content", "")
-            return content
-        return js.get("text") or json.dumps(js)
-    except Exception as e:
-        raise
-
-def call_hf_model(prompt):
-    """
-    Call Hugging Face text generation as fallback.
-    Use HF_API_KEY in env.
-    """
-    key = HF_API_KEY
-    if not key:
-        raise RuntimeError("HF API key yok")
-    try:
-        model_id = "gpt2"  # lightweight fallback example; you can change to a hosted conversational model
-        url = f"https://api-inference.huggingface.co/models/{model_id}"
-        headers = {"Authorization": f"Bearer {key}"}
-        payload = {"inputs": prompt, "parameters": {"max_new_tokens": 400}}
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
-        r.raise_for_status()
-        js = r.json()
-        if isinstance(js, list) and len(js)>0 and "generated_text" in js[0]:
-            return js[0]["generated_text"]
-        if isinstance(js, dict) and "generated_text" in js:
-            return js["generated_text"]
-        return str(js)
-    except Exception as e:
-        raise
-
-def generate_text(prompt):
-    """
-    Try Groq first, fallback to HF.
-    Returns tuple (result_text, backend_used, error_if_any)
-    """
-    # Try Groq
-    if GROQ_API_KEY:
+def get_feature(key, default=None):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM features WHERE key = ?", (key,))
+    r = cur.fetchone()
+    conn.close()
+    if r:
         try:
-            t = call_groq_model(prompt)
-            return t, "groq", None
-        except Exception as e:
-            # record error and fallback
-            err = str(e)
-    else:
-        err = "Groq key yok"
-    # fallback to HF
-    if HF_API_KEY:
-        try:
-            t = call_hf_model(prompt)
-            return t, "huggingface", None
-        except Exception as e2:
-            return None, None, f"HF Hata: {e2} | Groq hata: {err}"
-    return None, None, f"Model bulunumadı. Groq: {err}"
+            return json.loads(r[0])
+        except Exception:
+            return r[0]
+    return default
 
-# -------------------- Image generation (tokensız as request) --------------------
-def generate_image_from_hf(prompt, size="512x512"):
+# default features
+if get_feature("modes") is None:
+    set_feature("modes", {
+        "sohbet": True,
+        "odev": True,
+        "espri": True,
+        "sunum": True,
+        "gorsel": True
+    })
+
+# --- Helpers for messages ---
+def add_message(user_id, role, content):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO messages (user_id, role, content) VALUES (?,?,?)", (user_id, role, content))
+    conn.commit()
+    conn.close()
+
+def get_recent_messages(limit=50):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT m.*, u.username FROM messages m LEFT JOIN users u ON u.id = m.user_id ORDER BY m.created_at DESC LIMIT ?", (limit,))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+# --- Image helpers ---
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXT
+
+def hf_image_inference(file_path, task="image-to-image", model="stabilityai/stable-diffusion-2", params=None):
     """
-    Uses Hugging Face image-generation if HF_API_KEY exists.
-    Returns filename on success
+    Sends image to HF inference API (simple wrapper).
+    Returns dict with {ok:bool, data:...}
     """
     if not HF_API_KEY:
-        raise RuntimeError("HF API key yok")
+        return {"ok": False, "error": "HF_API_KEY yok"}
+    # read file
     try:
-        # Many HF image models require different endpoints; here we call a generic text-to-image endpoint
-        api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2"  # example
+        url = f"https://api-inference.huggingface.co/models/{model}"
+        headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+        with open(file_path, "rb") as f:
+            data = f.read()
+        # For many HF endpoints, we can POST raw bytes
+        r = requests.post(url, headers=headers, data=data, timeout=60)
+        if r.status_code == 200:
+            # response might be image bytes or json
+            content_type = r.headers.get("Content-Type", "")
+            if "application/json" in content_type:
+                return {"ok": True, "data": r.json()}
+            else:
+                return {"ok": True, "data": r.content}
+        else:
+            return {"ok": False, "error": f"HF status {r.status_code}: {r.text}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def groq_chat_completion(prompt, model="gpt-4o-mini", temperature=0.2):
+    """
+    Try to call Groq API (pseudo). If fails, return error dict.
+    We assume user will set GROQ_API_KEY in env. Endpoint unknown in some environments,
+    so this function is defensive.
+    """
+    if not GROQ_API_KEY:
+        return {"ok": False, "error": "No GROQ_API_KEY"}
+    try:
+        # Example Groq API format (may differ); adapt as needed by user.
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": 800
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        if r.status_code in (200, 201):
+            return {"ok": True, "data": r.json()}
+        else:
+            return {"ok": False, "error": f"GROQ {r.status_code}: {r.text}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def hf_chat_completion(prompt, model="gpt2", temperature=0.2):
+    """Fallback: use Hugging Face text-generation inference if Groq not available."""
+    if not HF_API_KEY:
+        return {"ok": False, "error": "No HF_API_KEY"}
+    try:
+        url = f"https://api-inference.huggingface.co/models/google/flan-t5-small"  # example; user may change
         headers = {"Authorization": f"Bearer {HF_API_KEY}"}
         payload = {"inputs": prompt}
-        r = requests.post(api_url, headers=headers, json=payload, timeout=60)
-        r.raise_for_status()
-        # HF may return image bytes or base64; handle common case with bytes
-        content_type = r.headers.get("Content-Type", "")
-        if "application/json" in content_type:
-            body = r.json()
-            # try interpret
-            if isinstance(body, dict) and "error" in body:
-                raise RuntimeError("HF image error: " + str(body["error"]))
-            # If base64 included:
-            b64 = body.get("b64_json") or body.get("image_base64")
-            if b64:
-                import base64
-                img_data = base64.b64decode(b64)
-            else:
-                raise RuntimeError("HF returned JSON but no image")
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            # HF often returns list of dicts
+            if isinstance(data, list) and data:
+                return {"ok": True, "data": data}
+            return {"ok": True, "data": data}
         else:
-            img_data = r.content
-        fname = f"{int(time.time())}.png"
-        fpath = os.path.join(UPLOAD_FOLDER, fname)
-        with open(fpath, "wb") as f:
-            f.write(img_data)
-        return fname
+            return {"ok": False, "error": f"HF chat status {r.status_code}: {r.text}"}
     except Exception as e:
-        raise
+        return {"ok": False, "error": str(e)}
 
-# -------------------- Templates (inline for single-file) --------------------
+def call_ai_chat(prompt):
+    """Try Groq first; if fails, fallback to HF. Return text."""
+    g = groq_chat_completion(prompt)
+    if g.get("ok"):
+        try:
+            # parse typical response structure
+            choices = g["data"].get("choices")
+            if choices and len(choices) > 0:
+                txt = choices[0].get("message", {}).get("content") or choices[0].get("text") or str(choices[0])
+                return {"ok": True, "data": txt}
+            # if entire json contains text
+            return {"ok": True, "data": json.dumps(g["data"])}
+        except Exception:
+            return {"ok": True, "data": json.dumps(g["data"])}
+    else:
+        # try HF
+        h = hf_chat_completion(prompt)
+        if h.get("ok"):
+            try:
+                # convert HF output to string
+                if isinstance(h["data"], list):
+                    return {"ok": True, "data": h["data"][0].get("generated_text", str(h["data"]))}
+                if isinstance(h["data"], dict):
+                    return {"ok": True, "data": h["data"].get("generated_text", json.dumps(h["data"]))}
+                return {"ok": True, "data": str(h["data"])}
+            except Exception:
+                return {"ok": True, "data": str(h["data"])}
+        else:
+            # both failed
+            return {"ok": False, "error": f"GROQ: {g.get('error')}; HF: {h.get('error')}"}
+
+# --- TEMPLATES ---
+# Use render_template_string with safe defaults to minimize Jinja errors.
 BASE_HTML = """
 <!doctype html>
 <html lang="tr">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>{{app_name}}</title>
+  <title>{{ app_name|default('KralZeka') }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    /* Basit, sade stil - gerektiğinde Tailwind ile değiştirilebilir */
-    body{background:#071017;color:#d7efe8;font-family:Inter,Arial,Helvetica,sans-serif;margin:0;padding:0}
-    header{background:#0b1b22;padding:18px 28px;display:flex;justify-content:space-between;align-items:center}
-    .brand{font-size:20px;font-weight:700;color:#e6d75e}
-    .container{max-width:980px;margin:30px auto;padding:20px}
-    .chatbox{background:#071f1b;padding:18px;border-radius:10px}
-    input,textarea,button,select{font-size:16px;padding:8px;border-radius:6px;border:1px solid #2e3b3a;background:#071f1b;color:#e7f0eb}
-    .msg{background:#072a26;padding:14px;border-radius:8px;margin:10px 0}
-    .admin-badge{color:#ffd36c;font-weight:700;margin-left:8px}
-    .top-actions{display:flex;gap:10px}
-    .panel{background:#051515;padding:14px;border-radius:8px;margin-top:18px}
-    a{color:#9ee1c8}
-    .small{font-size:13px;color:#9ac9b6}
-    .muted{color:#6f8c81}
-    .danger{color:#ff8b8b}
-    .success{color:#9be59b}
-    .modes{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    .mode-btn{background:#0f3831;padding:8px 12px;border-radius:6px;cursor:pointer}
+    body{background:#050607;color:#d9f7ee;font-family:Inter,Arial;margin:0;padding:0}
+    header{background:#06282a;padding:18px 30px}
+    .container{max-width:980px;margin:30px auto;padding:20px;background:#041416;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.6)}
+    input[type=text], input[type=password], textarea, select{width:100%;padding:10px;margin:6px 0;border-radius:8px;border:1px solid #2b524f;background:#0b2b2a;color:#dff}
+    button{background:#0e8e4a;color:white;padding:10px 18px;border:none;border-radius:8px;cursor:pointer}
+    .btn-ghost{background:transparent;border:1px solid #0e8e4a;color:#0e8e4a}
+    .row{display:flex;gap:12px}
+    .col{flex:1}
+    .message{background:#062c2b;padding:12px;border-radius:10px;margin:8px 0}
+    .small{font-size:0.9em;color:#a9e7d8}
+    .danger{color:#ff7b7b}
+    nav a{color:#cfeee1;margin-right:12px}
+    footer{padding:16px;text-align:center;color:#8fbfb4}
+    .panel{background:#082d2c;padding:12px;border-radius:10px}
+    .muted{color:#6ea79f}
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">{{app_name}}</div>
-    <div class="top-actions">
-      {% if user %}
-        <div>Merhaba, <strong>{{user.username}}</strong> {% if user.is_admin %}<span class="admin-badge">[ADMIN]</span>{% endif %}</div>
-        <a href="{{url_for('logout')}}">Çıkış yap</a>
-        {% if user.is_admin %}<a href="{{url_for('admin_panel')}}">Admin Panel</a>{% endif %}
-      {% else %}
-        <a href="{{url_for('login')}}">Giriş</a>
-        <a href="{{url_for('register')}}">Kayıt</a>
-      {% endif %}
+    <div style="max-width:980px;margin:0 auto;color:#fff;">
+      <h2 style="margin:0">{{ app_name|default('KralZeka') }}</h2>
     </div>
   </header>
   <div class="container">
-    {% block body %}{% endblock %}
-    <footer style="text-align:center;margin-top:40px" class="small muted">© {{app_name}} — KralZeka, Enes'in zekâsıyla hayat buldu.</footer>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for cat,msg in messages %}
+          <div class="message"><strong class="{{ cat }}">{{ msg }}</strong></div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
   </div>
+  <footer>© {{ app_name|default('KralZeka') }} — KralZeka, Enes'in zekasıyla hayat buldu.</footer>
 </body>
 </html>
 """
 
 INDEX_HTML = """
 {% extends base %}
-{% block body %}
-  <div class="chatbox">
-    <form id="chat-form" method="post" action="{{url_for('chat_submit')}}">
-      <div style="display:flex;gap:8px;">
-        <input name="message" placeholder="Bir şey yaz..." style="flex:1" />
-        <button type="submit">Gönder</button>
+{% block content %}
+  <div style="display:flex;gap:18px;flex-wrap:wrap">
+    <div style="flex:1;min-width:320px">
+      <div class="panel">
+        {% if user %}
+          <div><strong>Merhaba, {{ user.username|default('') }} {% if user.is_admin %}<span style="color:#e9cf3a">[ADMIN]</span>{% endif %}</strong></div>
+          <div class="small">Hoşgeldin! Modlar: {% for k,v in modes.items() %}{{ k }}{% if not loop.last %}, {% endif %}{% endfor %}</div>
+          <div style="margin-top:8px;">
+            <form method="post" action="{{ url_for('send_message') }}">
+              <textarea name="message" rows="3" placeholder="Bir şey yaz..." required></textarea>
+              <div style="display:flex;gap:10px;margin-top:6px">
+                <select name="mode">
+                  <option value="sohbet">Sohbet</option>
+                  <option value="odev">Ödev</option>
+                  <option value="espri">Espri</option>
+                  <option value="sunum">Sunum</option>
+                </select>
+                <button type="submit">Gönder</button>
+                <a href="{{ url_for('upload_view') }}" class="btn-ghost" style="padding:8px;text-decoration:none">Fotoğraf Yükle</a>
+                {% if user.is_admin %}
+                  <a href="{{ url_for('admin_panel') }}" style="padding:8px;text-decoration:none;color:#ffd27a">Admin Panel</a>
+                {% endif %}
+              </div>
+            </form>
+          </div>
+        {% else %}
+          <div class="small">Giriş yap veya kayıt ol.</div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <a href="{{ url_for('login') }}" class="btn-ghost" style="padding:8px;text-decoration:none">Giriş</a>
+            <a href="{{ url_for('register') }}" class="btn-ghost" style="padding:8px;text-decoration:none">Kayıt</a>
+          </div>
+        {% endif %}
       </div>
-    </form>
 
-    <div class="modes">
-      <!-- Modlar -->
-      <div class="mode-btn" onclick="location.href='?mode=sohbet'">Sohbet</div>
-      <div class="mode-btn" onclick="location.href='?mode=odev'">Ödev Yardımcısı</div>
-      <div class="mode-btn" onclick="location.href='?mode=espri'">Espri Modu</div>
-      <div class="mode-btn" onclick="location.href='?mode=sun'">Sunum / Slayt</div>
-      <div class="mode-btn" onclick="location.href='?mode=gorsel'">Görsel Oluşturma</div>
-      <div class="mode-btn" onclick="location.href='?mode=kalite'">Kalite Yükseltme</div>
-      {% if user and user.is_admin %}
-        <div class="mode-btn" onclick="location.href='?mode=kod'">Kod Yazma (Admin)</div>
-      {% endif %}
+      <div style="margin-top:18px">
+        <h3>Son Mesajlar</h3>
+        {% for msg in messages %}
+          <div class="message">
+            <div><strong>{{ msg.username|default('Anon') }}:</strong> {{ msg.content|default('') }}</div>
+            <div class="small muted">{{ msg.created_at }}</div>
+          </div>
+        {% else %}
+          <div class="small muted">Henüz mesaj yok.</div>
+        {% endfor %}
+      </div>
     </div>
 
-    <div class="panel">
-      <h3>Son mesajlar</h3>
-      {% for m in messages %}
-        <div class="msg">
-          <div><strong>{{m.role|capitalize}}:</strong> {{m.content}}</div>
-          <div class="small muted">{{m.timestamp}}</div>
+    <div style="width:320px;min-width:260px">
+      <div class="panel">
+        <h4>Durum</h4>
+        <div class="small">Groq hazır: <strong>{{ groq_ok|default(false) }}</strong></div>
+        <div class="small">HuggingFace hazır: <strong>{{ hf_ok|default(false) }}</strong></div>
+        <hr/>
+        <h4>Modlar</h4>
+        <ul class="small">
+          {% for k,v in modes.items() %}
+            <li>{{ k }} — {{ 'Açık' if v else 'Kapalı' }}</li>
+          {% endfor %}
+        </ul>
+        <hr/>
+        <h4>Hızlı Aksiyonlar</h4>
+        <div class="small">
+          <form method="post" action="{{ url_for('self_diagnose') }}">
+            <button type="submit" class="btn-ghost">Sistemi Kontrol Et</button>
+          </form>
         </div>
-      {% else %}
-        <div class="small muted">Henüz mesaj yok.</div>
-      {% endfor %}
-    </div>
+      </div>
 
-    <div class="panel">
-      <h4>Model Durumu</h4>
-      <div class="small">Ana model: Groq {% if groq_ok %}<span class="success"> (aktif)</span>{% else %}<span class="danger"> (inaktif)</span>{% endif %}</div>
-      <div class="small">Yedek: Hugging Face {% if hf_ok %}<span class="success"> (aktif)</span>{% else %}<span class="danger"> (inaktif)</span>{% endif %}</div>
+      <div style="margin-top:12px" class="panel">
+        <h4>Yenilik Talebi</h4>
+        <form method="post" action="{{ url_for('feature_request') }}">
+          <input type="text" name="title" placeholder="Talep başlığı" required/>
+          <textarea name="desc" rows="3" placeholder="Detay" required></textarea>
+          <button type="submit">Gönder</button>
+        </form>
+      </div>
     </div>
   </div>
 {% endblock %}
@@ -398,303 +448,422 @@ INDEX_HTML = """
 
 LOGIN_HTML = """
 {% extends base %}
-{% block body %}
-  <div style="max-width:420px;margin:20px auto" class="panel">
-    <h3>Giriş</h3>
-    <form method="post">
-      <div style="margin-bottom:8px"><input name="username" placeholder="Kullanıcı adı" /></div>
-      <div style="margin-bottom:8px"><input name="password" placeholder="Şifre" type="password" /></div>
-      <button type="submit">Giriş yap</button>
-    </form>
-    <div class="small muted" style="margin-top:8px">İlk admin: kullanıcı <strong>enes</strong>, şifre <strong>enes1357924680</strong></div>
-  </div>
+{% block content %}
+  <h3>Giriş Yap</h3>
+  <form method="post">
+    <input type="text" name="username" placeholder="Kullanıcı adı" required/>
+    <input type="password" name="password" placeholder="Şifre" required/>
+    <button type="submit">Giriş</button>
+  </form>
 {% endblock %}
 """
 
 REGISTER_HTML = """
 {% extends base %}
-{% block body %}
-  <div style="max-width:420px;margin:20px auto" class="panel">
-    <h3>Kayıt Ol</h3>
-    <form method="post">
-      <div style="margin-bottom:8px"><input name="username" placeholder="Kullanıcı adı" /></div>
-      <div style="margin-bottom:8px"><input name="password" placeholder="Şifre" type="password" /></div>
-      <div style="margin-bottom:8px"><input name="password2" placeholder="Şifre tekrar" type="password" /></div>
-      <button type="submit">Kayıt ol</button>
-    </form>
-  </div>
+{% block content %}
+  <h3>Kayıt Ol</h3>
+  <form method="post">
+    <input type="text" name="username" placeholder="Kullanıcı adı" required/>
+    <input type="password" name="password" placeholder="Şifre" required/>
+    <input type="password" name="password2" placeholder="Şifre (tekrar)" required/>
+    <button type="submit">Kayıt</button>
+  </form>
+{% endblock %}
+"""
+
+UPLOAD_HTML = """
+{% extends base %}
+{% block content %}
+  <h3>Fotoğraf Yükle</h3>
+  <form method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept="image/*" required/>
+    <select name="action">
+      <option value="describe">Fotoğrafı Açıkla</option>
+      <option value="upscale">Kalite Yükselt (günlük limit uygulanır)</option>
+    </select>
+    <button type="submit">Yükle ve İşle</button>
+  </form>
 {% endblock %}
 """
 
 ADMIN_HTML = """
 {% extends base %}
-{% block body %}
-  <div class="panel">
-    <h3>Admin Panel</h3>
-    <div class="small">Kullanıcı listesi</div>
-    <ul>
+{% block content %}
+  <h3>Admin Paneli</h3>
+  <div style="display:flex;gap:12px">
+    <div style="flex:1">
+      <h4>Kullanıcılar</h4>
       {% for u in users %}
-        <li>
-          {{u.username}} {% if u.is_admin %}<span class="admin-badge">[ADMIN]</span>{% endif %}
-          {% if u.username != 'enes' %}
-            {% if not u.is_admin %}
-              <button onclick="fetch('{{url_for('make_admin',user_id=u.id)}}',{method:'POST'}).then(()=>location.reload())">Admin yap</button>
+        <div class="panel small">
+          <strong>{{ u.username }}</strong> {% if u.is_admin %}<span style="color:#ffd27a">[ADMIN]</span>{% endif %}
+          <div class="small muted">Oluşturulma: {{ u.created_at }}</div>
+          <div style="margin-top:6px">
+            {% if not (u.username == 'enes') %}
+              <form method="post" style="display:inline" action="{{ url_for('admin_make_admin') }}">
+                <input type="hidden" name="username" value="{{ u.username }}">
+                <button type="submit">Admin Yap</button>
+              </form>
+              <form method="post" style="display:inline" action="{{ url_for('admin_delete_user') }}">
+                <input type="hidden" name="username" value="{{ u.username }}">
+                <button type="submit" class="danger">Sil</button>
+              </form>
             {% else %}
-              <button onclick="fetch('{{url_for('revoke_admin',user_id=u.id)}}',{method:'POST'}).then(()=>location.reload())">Adminlıktan al</button>
+              <div class="small muted">İlk admin (enes) korumalıdır.</div>
             {% endif %}
-            <button onclick="fetch('{{url_for('delete_user',user_id=u.id)}}',{method:'POST'}).then(()=>location.reload())" class="danger">Sil</button>
-          {% else %}
-            <span class="small muted">İlk admin silinemez</span>
-          {% endif %}
-        </li>
+          </div>
+        </div>
       {% endfor %}
-    </ul>
-    <hr />
-    <h4>Admin istekleri (son)</h4>
-    <ul>
-      {% for a in admin_actions %}
-        <li class="small">{{a.timestamp}} — admin_id:{{a.admin_user}} action:{{a.action}} target:{{a.target_user}}</li>
-      {% endfor %}
-    </ul>
+    </div>
+
+    <div style="width:360px">
+      <h4>Admin Araçları</h4>
+      <div class="panel small">
+        <form method="post" action="{{ url_for('admin_broadcast') }}">
+          <textarea name="text" rows="3" placeholder="Tüm kullanıcılara duyuru..."></textarea>
+          <button type="submit">Duyur</button>
+        </form>
+      </div>
+
+      <h4>Log / Son İşlemler</h4>
+      <div class="panel small">
+        {% for a in actions %}
+          <div class="small"><strong>{{ a.action }}</strong> — {{ a.created_at }} (admin_id: {{ a.admin_id }})</div>
+        {% else %}
+          <div class="small muted">Henüz admin işlemi yok.</div>
+        {% endfor %}
+      </div>
+    </div>
   </div>
 {% endblock %}
 """
 
-# -------------------- Routes --------------------
-@app.route("/")
+# --- ROUTES ---
+@app.route("/", methods=["GET"])
 def index():
-    user = current_user()
-    db = get_db()
-    msgs = []
-    cur = db.execute("SELECT m.*, u.username FROM messages m LEFT JOIN users u ON u.id = m.user_id ORDER BY m.id DESC LIMIT 20")
-    for r in cur.fetchall():
-        msgs.append({"role": r["role"], "content": r["content"], "timestamp": r["timestamp"], "username": r["username"]})
-    # check model status
-    groq_ok = bool(GROQ_API_KEY)
-    hf_ok = bool(HF_API_KEY)
-    return render_template_string(INDEX_HTML, base=BASE_HTML, app_name=APP_NAME, user=user, messages=msgs, groq_ok=groq_ok, hf_ok=hf_ok)
+    try:
+        user = get_current_user()
+        msgs = get_recent_messages(20)
+        modes = get_feature("modes", {})
+        groq_ok = bool(GROQ_API_KEY)
+        hf_ok = bool(HF_API_KEY)
+        return render_template_string(
+            INDEX_HTML,
+            base=BASE_HTML, app_name=APP_NAME, user=user, messages=msgs,
+            modes=modes, groq_ok=groq_ok, hf_ok=hf_ok
+        )
+    except Exception as e:
+        log("Index render error: " + str(e))
+        # render a minimal fallback page to avoid 500
+        return render_template_string(BASE_HTML, app_name=APP_NAME, base=BASE_HTML, content=f"<div class='message danger'>Sunucu hata verdi: {str(e)}</div>")
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        username = request.form.get("username","").strip()
-        password = request.form.get("password","").strip()
-        db = get_db()
-        cur = db.execute("SELECT * FROM users WHERE username = ?", (username,))
+        username = (request.form.get("username") or "").strip()
+        password = (request.form.get("password") or "")
+        if not username or not password:
+            flash("Kullanıcı adı ve şifre gerekli.", "error")
+            return redirect(url_for('login'))
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE username = ?", (username,))
         row = cur.fetchone()
-        if row and row["password"] == password:
+        conn.close()
+        if row and check_password_hash(row["password_hash"], password):
             login_user(username)
-            return redirect(url_for("index"))
+            flash("Giriş başarılı.", "info")
+            return redirect(url_for('index'))
         else:
-            return render_template_string(LOGIN_HTML, base=BASE_HTML, app_name=APP_NAME, user=None, error="Hatalı giriş")
-    return render_template_string(LOGIN_HTML, base=BASE_HTML, app_name=APP_NAME, user=None)
-
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    if request.method == "POST":
-        username = request.form.get("username","").strip()
-        password = request.form.get("password","").strip()
-        password2 = request.form.get("password2","").strip()
-        if not username or not password or password != password2:
-            return render_template_string(REGISTER_HTML, base=BASE_HTML, app_name=APP_NAME, user=None, error="Hata")
-        db = get_db()
-        try:
-            db.execute("INSERT INTO users (username,password,is_admin,created_at) VALUES (?,?,?,?)",
-                       (username, password, 0, datetime.utcnow().isoformat()))
-            db.commit()
-            login_user(username)
-            return redirect(url_for("index"))
-        except sqlite3.IntegrityError:
-            return render_template_string(REGISTER_HTML, base=BASE_HTML, app_name=APP_NAME, user=None, error="Kullanıcı zaten var")
-    return render_template_string(REGISTER_HTML, base=BASE_HTML, app_name=APP_NAME, user=None)
+            flash("Giriş başarısız.", "error")
+            return redirect(url_for('login'))
+    return render_template_string(LOGIN_HTML, base=BASE_HTML, app_name=APP_NAME)
 
 @app.route("/logout")
 def logout():
     logout_user()
-    return redirect(url_for("index"))
+    flash("Çıkış yapıldı.", "info")
+    return redirect(url_for('index'))
 
-@app.route("/chat", methods=["POST"])
-def chat_submit():
-    user = current_user()
-    if not user:
-        return redirect(url_for("login"))
-    msg = request.form.get("message","").strip()
-    if not msg:
-        return redirect(url_for("index"))
-    # determine mode param (basic)
-    mode = request.args.get("mode","sohbet")
-    # Save user message
-    log_message(user["id"], "user", msg)
-    # Build prompt based on mode
-    prompt = build_prompt_for_mode(mode, user, msg)
-    # call model
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        password2 = request.form.get("password2") or ""
+        if not username or not password or not password2:
+            flash("Tüm alanlar gerekli.", "error")
+            return redirect(url_for('register'))
+        if password != password2:
+            flash("Şifreler eşleşmiyor.", "error")
+            return redirect(url_for('register'))
+        conn = get_db_conn()
+        cur = conn.cursor()
+        try:
+            phash = generate_password_hash(password)
+            cur.execute("INSERT INTO users (username, password_hash, is_admin, daily_upscale_count, daily_upscale_date) VALUES (?,?,?,?,?)",
+                        (username, phash, 0, 0, date.today().isoformat()))
+            conn.commit()
+            flash("Kayıt başarılı. Giriş yapabilirsiniz.", "info")
+            return redirect(url_for('login'))
+        except sqlite3.IntegrityError:
+            flash("Kullanıcı adı alınmış.", "error")
+            return redirect(url_for('register'))
+        finally:
+            conn.close()
+    return render_template_string(REGISTER_HTML, base=BASE_HTML, app_name=APP_NAME)
+
+@app.route("/send_message", methods=["POST"])
+@login_required
+def send_message():
     try:
-        out, backend, err = generate_text(prompt)
-        if err:
-            response_text = f"Hata: {err}"
+        user = get_current_user()
+        text = (request.form.get("message") or "").strip()
+        mode = (request.form.get("mode") or "sohbet")
+        if not text:
+            flash("Boş mesaj gönderilemez.", "error")
+            return redirect(url_for('index'))
+        # store user message
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username = ?", (user['username'],))
+        row = cur.fetchone()
+        user_id = row[0] if row else None
+        add_message(user_id, "user", text)
+        # Prepare AI prompt depending on mode
+        prompt = f"[MOD:{mode}] {text}\nLütfen Türkçe cevap ver ve kısaca özetle."
+        # Call AI (groq -> hf)
+        res = call_ai_chat(prompt)
+        if res.get("ok"):
+            ai_text = res.get("data")
+            add_message(user_id, "assistant", ai_text)
+            flash("Cevap hazır.", "info")
         else:
-            response_text = out
+            add_message(user_id, "assistant", "Üzgünüm, model çağrılamadı: " + str(res.get("error")))
+            flash("AI çağrısında sorun: " + str(res.get("error")), "error")
     except Exception as e:
-        response_text = f"KralZeka hata: {str(e)}"
-    # Save assistant message
-    log_message(user["id"], "assistant", response_text)
-    return redirect(url_for("index"))
+        log("send_message error: " + traceback.format_exc())
+        flash("Mesaj gönderilirken hata oluştu.", "error")
+    return redirect(url_for('index'))
 
-def build_prompt_for_mode(mode, user, msg):
-    # Build contextual prompt according to modes the user selected. Turkish texts.
-    header = "KralZeka — Türkçe zeka. Kullanıcı isteği: "
-    if mode == "odev":
-        # If image attached, instruct to narrate and solve; simplified here.
-        return header + f"Ödev yardım modu. Kullanıcının sorusu: {msg} Lütfen açık, adım adım çözüm ve kısa test soruları ver."
-    if mode == "espri":
-        return header + f"Espri modu. Kullanıcı: {msg} Cevabı şakacı ve eğlenceli olsun."
-    if mode == "sun":
-        return header + f"Sunum modu. Kullanıcının verdiği konu: {msg} 5 slaytlık özet hazırla, madde madde."
-    if mode == "gorsel":
-        return header + f"Görsel oluşturma isteği: {msg} (sadece kısa prompt üret)"
-    if mode == "kalite":
-        return header + f"Kalite yükseltme: {msg} Görsel/çeviri iyileştirme önerileri ver."
-    if mode == "kod":
-        # Admin code helper: ask clarifying if needed (but only admin uses)
-        return header + f"Admin kod yardım modu. Kullanıcı: {msg} Çalıştırılabilir kod örneği ve açıklama ver."
-    # default: sohbet
-    return header + msg
+@app.route("/upload", methods=["GET", "POST"])
+@login_required
+def upload_view():
+    user = get_current_user()
+    if request.method == "POST":
+        if 'file' not in request.files:
+            flash("Dosya yok.", "error")
+            return redirect(url_for('upload_view'))
+        f = request.files['file']
+        if f.filename == '':
+            flash("Dosya adı boş.", "error")
+            return redirect(url_for('upload_view'))
+        if not allowed_file(f.filename):
+            flash("Geçersiz dosya uzantısı.", "error")
+            return redirect(url_for('upload_view'))
+        action = request.form.get("action", "describe")
+        filename = secure_filename(f.filename)
+        unique = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+        path = os.path.join(app.config['UPLOAD_FOLDER'], unique)
+        f.save(path)
+        # If upscale action, check daily limit
+        try:
+            conn = get_db_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT id, daily_upscale_count, daily_upscale_date FROM users WHERE username = ?", (user['username'],))
+            r = cur.fetchone()
+            if r:
+                uid = r["id"]
+                count = r["daily_upscale_count"] or 0
+                ddate = r["daily_upscale_date"] or date.today().isoformat()
+                if ddate != date.today().isoformat():
+                    count = 0
+                    ddate = date.today().isoformat()
+                if action == "upscale" and not user.get('is_admin'):
+                    if count >= DEFAULT_DAILY_UPSCALE_LIMIT:
+                        flash("Günlük kalite yükseltme limiti doldu.", "error")
+                        return redirect(url_for('upload_view'))
+            else:
+                flash("Kullanıcı bulunamadı.", "error")
+                return redirect(url_for('upload_view'))
+            # Call HF image inference
+            if GROQ_API_KEY:
+                # prefer Groq? Not all Groq endpoints support images; keep HF as main for images
+                pass
+            hf_res = hf_image_inference(path)
+            if hf_res.get("ok"):
+                data = hf_res.get("data")
+                # if bytes -> save returned image
+                if isinstance(data, (bytes, bytearray)):
+                    outname = unique + "_out.png"
+                    outpath = os.path.join(app.config['UPLOAD_FOLDER'], outname)
+                    with open(outpath, "wb") as out:
+                        out.write(data)
+                    flash("İşlem tamamlandi. Görsel kaydedildi.", "info")
+                else:
+                    flash("İşlem tamamlandı (metin).", "info")
+                # increment daily count if upscale
+                if action == "upscale":
+                    new_count = (count or 0) + 1
+                    cur.execute("UPDATE users SET daily_upscale_count = ?, daily_upscale_date = ? WHERE id = ?", (new_count, date.today().isoformat(), uid))
+                    conn.commit()
+            else:
+                flash("Görsel işlem hatası: " + str(hf_res.get("error")), "error")
+            conn.close()
+        except Exception as e:
+            log("upload error: " + traceback.format_exc())
+            flash("Yükleme sırasında hata: " + str(e), "error")
+        return redirect(url_for('upload_view'))
+    return render_template_string(UPLOAD_HTML, base=BASE_HTML, app_name=APP_NAME)
 
-# -------------------- Admin endpoints --------------------
-@app.route("/admin")
+@app.route("/admin", methods=["GET"])
 @admin_required
 def admin_panel():
-    db = get_db()
-    users = db.execute("SELECT id,username,is_admin FROM users ORDER BY id ASC").fetchall()
-    admin_actions = db.execute("SELECT * FROM admin_actions ORDER BY id DESC LIMIT 30").fetchall()
-    return render_template_string(ADMIN_HTML, base=BASE_HTML, app_name=APP_NAME, user=current_user(), users=users, admin_actions=admin_actions)
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, username, is_admin, created_at FROM users ORDER BY created_at DESC")
+    users = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT * FROM admin_actions ORDER BY created_at DESC LIMIT 50")
+    actions = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return render_template_string(ADMIN_HTML, base=BASE_HTML, app_name=APP_NAME, users=users, actions=actions)
 
-@app.route("/admin/make_admin/<int:user_id>", methods=["POST"])
+@app.route("/admin/make_admin", methods=["POST"])
 @admin_required
-def make_admin(user_id):
-    cur_user = current_user()
-    db = get_db()
-    # prevent making 'enes' admin-change by others? rule: enes cannot be removed; but making admin is allowed
-    db.execute("UPDATE users SET is_admin=1 WHERE id=?", (user_id,))
-    db.commit()
-    record_admin_action(cur_user["id"], "make_admin", user_id)
-    return jsonify({"ok":True})
+def admin_make_admin():
+    target = (request.form.get("username") or "").strip()
+    current = get_current_user()
+    if not target:
+        flash("Hedef kullanıcı yok.", "error")
+        return redirect(url_for('admin_panel'))
+    if target == "enes":
+        flash("enes hesabına müdahale edilemez.", "error")
+        return redirect(url_for('admin_panel'))
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (target,))
+    conn.commit()
+    cur.execute("INSERT INTO admin_actions (admin_id, action, meta) VALUES (?,?,?)", (current['id'], "make_admin", target))
+    conn.commit()
+    conn.close()
+    flash(f"{target} artık admin.", "info")
+    return redirect(url_for('admin_panel'))
 
-@app.route("/admin/revoke_admin/<int:user_id>", methods=["POST"])
+@app.route("/admin/delete_user", methods=["POST"])
 @admin_required
-def revoke_admin(user_id):
-    cur_user = current_user()
-    # cannot revoke enes (first admin)
-    db = get_db()
-    row = db.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
-    if row and row["username"] == "enes":
-        # record attempt
-        record_admin_action(cur_user["id"], "attempt_revoke_enes", user_id)
-        return jsonify({"error":"İlk admin (enes) adminlikten alınamaz. Deneme kaydedildi."}), 403
-    db.execute("UPDATE users SET is_admin=0 WHERE id=?", (user_id,))
-    db.commit()
-    record_admin_action(cur_user["id"], "revoke_admin", user_id)
-    return jsonify({"ok":True})
+def admin_delete_user():
+    target = (request.form.get("username") or "").strip()
+    current = get_current_user()
+    if not target:
+        flash("Hedef kullanıcı yok.", "error")
+        return redirect(url_for('admin_panel'))
+    if target == "enes":
+        # log attempt
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO admin_actions (admin_id, action, meta) VALUES (?,?,?)", (current['id'], "delete_attempt_on_enes", target))
+        conn.commit()
+        conn.close()
+        flash("Bu kullanıcı silinemez. Enes'e bildirildi.", "error")
+        return redirect(url_for('admin_panel'))
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM users WHERE username = ?", (target,))
+    conn.commit()
+    cur.execute("INSERT INTO admin_actions (admin_id, action, meta) VALUES (?,?,?)", (current['id'], "delete_user", target))
+    conn.commit()
+    conn.close()
+    flash(f"{target} silindi.", "info")
+    return redirect(url_for('admin_panel'))
 
-@app.route("/admin/delete_user/<int:user_id>", methods=["POST"])
+@app.route("/admin/broadcast", methods=["POST"])
 @admin_required
-def delete_user(user_id):
-    cur_user = current_user()
-    db = get_db()
-    row = db.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
-    if row and row["username"] == "enes":
-        record_admin_action(cur_user["id"], "attempt_delete_enes", user_id)
-        return jsonify({"error":"İlk admin silinemez"}), 403
-    db.execute("DELETE FROM users WHERE id=?", (user_id,))
-    db.commit()
-    record_admin_action(cur_user["id"], "delete_user", user_id)
-    return jsonify({"ok":True})
+def admin_broadcast():
+    text = (request.form.get("text") or "").strip()
+    current = get_current_user()
+    if not text:
+        flash("Mesaj boş.", "error")
+        return redirect(url_for('admin_panel'))
+    conn = get_db_conn()
+    cur = conn.cursor()
+    # attach broadcast as system messages for visibility
+    cur.execute("INSERT INTO messages (user_id, role, content) VALUES (?,?,?)", (current['id'], 'system', text))
+    conn.commit()
+    cur.execute("INSERT INTO admin_actions (admin_id, action, meta) VALUES (?,?,?)", (current['id'], "broadcast", text))
+    conn.commit()
+    conn.close()
+    flash("Duyuru gönderildi.", "info")
+    return redirect(url_for('admin_panel'))
 
-# -------------------- Image upload and retrieval --------------------
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".",1)[1].lower() in ALLOWED_IMAGE_EXT
+@app.route("/feature_request", methods=["POST"])
+@login_required
+def feature_request():
+    title = (request.form.get("title") or "").strip()
+    desc = (request.form.get("desc") or "").strip()
+    user = get_current_user()
+    if not title or not desc:
+        flash("Başlık ve açıklama gerekli.", "error")
+        return redirect(url_for('index'))
+    # store as admin_action for review
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO admin_actions (admin_id, action, meta) VALUES (?,?,?)", (user['id'], "feature_request", json.dumps({"title": title, "desc": desc})))
+    conn.commit()
+    conn.close()
+    flash("Talebiniz gönderildi. Teşekkürler!", "info")
+    return redirect(url_for('index'))
 
-@app.route("/upload_image", methods=["POST"])
-def upload_image():
-    user = current_user()
-    if not user:
-        return jsonify({"error":"Giriş yapın"}), 403
-    if 'image' not in request.files:
-        return jsonify({"error":"No file"}), 400
-    f = request.files['image']
-    if f.filename == "":
-        return jsonify({"error":"No selected"}), 400
-    if not allowed_file(f.filename):
-        return jsonify({"error":"Type not allowed"}), 400
-    fn = f"{int(time.time())}_{f.filename}"
-    path = os.path.join(UPLOAD_FOLDER, fn)
-    f.save(path)
-    # We might perform OCR or image parsing here — placeholder
-    log_message(user["id"], "user", f"[Görsel yüklendi] {fn}")
-    return jsonify({"ok":True, "filename":fn})
-
-@app.route("/uploads/<path:filename>")
-def uploaded_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-# -------------------- Simple API endpoints --------------------
-@app.route("/api/chat", methods=["POST"])
-def api_chat():
-    api_key = request.headers.get("X-API-KEY")
-    # allow logged-in session or provide API key for third-party use (simplified)
-    user = current_user()
-    if not user and not api_key:
-        return jsonify({"error":"Yetkisiz"}), 401
-    msg = request.json.get("message","")
-    mode = request.json.get("mode","sohbet")
-    # if admin-only mode requested but user not admin -> deny
-    if mode == "kod" and (not user or user["is_admin"]!=1):
-        return jsonify({"error":"Kod modu sadece adminler için"}), 403
-    prompt = build_prompt_for_mode(mode, user or {"username":"api"}, msg)
-    out, backend, err = generate_text(prompt)
-    if err:
-        return jsonify({"error":err}), 500
-    # log
-    if user:
-        log_message(user["id"], "user", msg)
-        log_message(user["id"], "assistant", out)
-    return jsonify({"response":out, "backend":backend})
-
-@app.route("/api/image", methods=["POST"])
-def api_image():
-    user = current_user()
-    if not user:
-        return jsonify({"error":"Giriş gerekli"}), 401
-    prompt = request.json.get("prompt","")
+@app.route("/self_diagnose", methods=["POST"])
+@login_required
+def self_diagnose():
+    # run a small diagnostic and report to user
     try:
-        fname = generate_image_from_hf(prompt)
-        log_message(user["id"], "assistant", f"[Görsel oluşturuldu] {fname}")
-        return jsonify({"file":url_for("uploaded_file", filename=fname)})
+        groq_ok = bool(GROQ_API_KEY)
+        hf_ok = bool(HF_API_KEY)
+        resp = {
+            "groq": groq_ok,
+            "hf": hf_ok,
+            "db_exists": os.path.exists(DB_PATH),
+            "uploads_dir": os.path.exists(app.config['UPLOAD_FOLDER']),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        flash("Sistem tanılama yapıldı. Sonuç: " + json.dumps(resp), "info")
     except Exception as e:
-        return jsonify({"error":str(e)}), 500
+        flash("Tanılama hatası: " + str(e), "error")
+    return redirect(url_for('index'))
 
-# -------------------- Health check route --------------------
-@app.route("/health")
-def health():
-    return jsonify({"status":"ok","time":datetime.utcnow().isoformat()})
 
-# -------------------- Error handlers --------------------
-@app.errorhandler(404)
-def not_found(e):
-    return "Not Found", 404
+# --- API endpoint for admin-only "kod yaz" feature ---
+@app.route("/admin/code_writer", methods=["POST"])
+@admin_required
+def admin_code_writer():
+    """
+    Bu endpoint adminlerin kod talep etmesine izin verir.
+    Güvenlik nedeniyle bu sadece metin üretir ve dosya sistemi üzerinde otomatik çalıştırmaz.
+    """
+    prompt = (request.form.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"ok": False, "error": "prompt boş"}), 400
+    # ask AI for a code snippet
+    res = call_ai_chat("Kod üret: " + prompt)
+    if res.get("ok"):
+        return jsonify({"ok": True, "code": res.get("data")})
+    else:
+        return jsonify({"ok": False, "error": res.get("error")}), 500
 
-@app.errorhandler(500)
-def internal_error(e):
-    tb = traceback.format_exc()
-    return f"Internal Error: {str(e)}\n\n{tb}", 500
+# --- Static send for uploaded files (safe) ---
+@app.route("/uploads/<path:filename>")
+@login_required
+def uploaded_file(filename):
+    # only allow serving from uploads folder
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=False)
 
-# -------------------- Run server (for local debug) --------------------
+# --- Start helper for gunicorn ---
 def start_app():
-    # init DB context within app
-    with app.app_context():
-        init_db(force=False)
-    # If running via gunicorn, this won't execute.
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    # any startup tasks
+    log(f"{APP_NAME} starting... (Groq: {bool(GROQ_API_KEY)}, HF: {bool(HF_API_KEY)})")
 
-if __name__ == "__main__":
-    start_app()
+# run when module imported by gunicorn
+start_app()
+
+# Expose app for gunicorn
+# `gunicorn kralzeka_app:app`
