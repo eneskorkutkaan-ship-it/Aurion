@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}KralZeka Asistanı{% endblock %}
+{% block content %}
+<div class="container-fluid mt-3">
+  <div class="row">
+    <!-- Sol Menü -->
+    <div class="col-md-3">
+      <div class="card shadow-sm p-3">
+        <h4 class="mb-3 text-center">⚙️ Modlar</h4>
+        <ul class="list-group">
+          <li class="list-group-item"><a href="/chat?mode=sohbet">💬 Sohbet Modu</a></li>
+          <li class="list-group-item"><a href="/chat?mode=sunum">🖼️ Sunum Modu</a></li>
+          <li class="list-group-item"><a href="/chat?mode=gorsel">🎨 Görsel Oluşturma</a></li>
+          <li class="list-group-item"><a href="/chat?mode=kalite">📈 Görsel Kalite Yükseltme</a></li>
+          {% if current_user.is_admin %}
+          <li class="list-group-item"><a href="/chat?mode=kod">💻 Kod Yazma (Yalnızca Admin)</a></li>
+          <li class="list-group-item"><a href="/chat?mode=ogretim">📘 Yazılım Öğretme</a></li>
+          {% endif %}
+        </ul>
+
+        <div class="mt-4">
+          <form method="POST" action="/upload_image" enctype="multipart/form-data">
+            <label class="form-label">📸 Görsel Yükle</label>
+            <input type="file" name="image" class="form-control mb-2" accept="image/*" required>
+            <button class="btn btn-sm btn-primary w-100" type="submit">Yükle</button>
+          </form>
+        </div>
+
+        {% if current_user.is_admin %}
+        <div class="mt-4">
+          <a href="/admin_panel" class="btn btn-warning w-100">👑 Yönetici Paneli</a>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Sohbet Alanı -->
+    <div class="col-md-9">
+      <div class="card shadow-sm p-3">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h4>🧠 {{ mode|capitalize }} Modu</h4>
+          <form action="/logout" method="post">
+            <button class="btn btn-danger btn-sm">Çıkış Yap</button>
+          </form>
+        </div>
+
+        <!-- Sohbet Geçmişi -->
+        <div id="chat-box" class="border p-3 mb-3" style="height: 400px; overflow-y: auto;">
+          {% for msg in messages %}
+          <div class="mb-2">
+            {% if msg.sender == 'user' %}
+              <div class="text-end"><span class="badge bg-primary">Sen:</span> {{ msg.text }}</div>
+            {% else %}
+              <div><span class="badge bg-secondary">KralZeka:</span> {{ msg.text|safe }}</div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+
+        <!-- Mesaj Gönderme Alanı -->
+        <form method="POST" action="/send_message" class="d-flex">
+          <input type="hidden" name="mode" value="{{ mode }}">
+          <input type="text" name="message" class="form-control me-2" placeholder="Mesajınızı yazın..." required>
+          <button class="btn btn-success">Gönder</button>
+        </form>
+
+        {% if mode == "gorsel" %}
+        <small class="text-muted mt-2 d-block">🎨 Görsel oluşturmak için kısa açıklama girin. (Örnek: “Uzayda yürüyen kedi”)</small>
+        {% elif mode == "kalite" %}
+        <small class="text-muted mt-2 d-block">📈 Görsel kalitesini artırmak için yüklediğiniz görseli seçin.</small>
+        {% elif mode == "kod" and current_user.is_admin %}
+        <small class="text-muted mt-2 d-block">💻 Kod yazma modunda, önce yapmak istediğin projeyi anlat; KralZeka detay soracak.</small>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Otomatik chat kaydırma
+  const chatBox = document.getElementById('chat-box');
+  if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
+</script>
+{% endblock %}
