@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Kayıt Ol - KralZeka{% endblock %}
+
+{% block content %}
+<header>
+  <h1>KRALZEKA KAYIT</h1>
+</header>
+
+<div class="container">
+  <form action="{{ url_for('register') }}" method="POST">
+    <h2>Yeni Hesap Oluştur</h2>
+    {% if error %}
+      <p style="color: red;">{{ error }}</p>
+    {% endif %}
+    <input type="text" name="username" placeholder="Kullanıcı Adı" required><br>
+    <input type="password" name="password" placeholder="Şifre" required><br>
+    <button type="submit">Kayıt Ol</button>
+  </form>
+
+  <p>Zaten hesabın var mı? <a href="{{ url_for('login') }}">Giriş Yap</a></p>
+</div>
+{% endblock %}
