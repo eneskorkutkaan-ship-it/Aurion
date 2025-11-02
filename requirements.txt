@@ -1,7 +1,5 @@
-Flask>=2.2
+Flask
+Flask-Login
 Flask-SQLAlchemy
-requests
-Pillow
-reportlab
+Werkzeug
 gunicorn
-werkzeug
