@@ -1,1 +1,1 @@
-web: python kralzeka_app.py
+web: gunicorn kralzeka_app:app
