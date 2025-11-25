@@ -1,7 +1,7 @@
 Flask
 gunicorn
-python-dotenv
-flask-limiter
 sqlite-utils
 google-genai
+flask-limiter
 requests
+werkzeug
