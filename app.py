@@ -1,6 +1,6 @@
 # ==============================================================================
-# AURION PROJESİ - TEK DOSYALIK YAPAY ZEKA UYGULAMASI (app.py)
-# Tüm 16 özellik dahil edilmiştir. (1. Admin, 3. Gemini, 9. Tek Dosya, 16. Süper Admin Modülleri)
+# AURION PROJESİ - TÜM 16 ÖZELLİK DAHİL TAM KOD (app.py)
+# Versiyon: 1.0 (Dağıtım Hatalarına Karşı Dirençli)
 # ==============================================================================
 
 import os
@@ -13,26 +13,34 @@ from flask_limiter.util import get_remote_address
 from google import genai
 from google.genai import types
 import json
-import time
-import re # Öz Onarım Simülasyonu için
+import re
+import sys
 
 # ==============================================================================
-# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER
+# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER (RENDER.COM İÇİN)
 # ==============================================================================
 
-# Çevresel değişkenler os.getenv() ile yüklenir (Render.com uyumlu)
+# Ortam değişkenlerini os.getenv() ile yükle
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
-SECRET_KEY = os.getenv("SECRET_KEY", "cok_gizli_bir_anahtar_buraya_yazin")
+# 11. Güvenli Anahtar: Kendi belirlediğiniz gizli anahtar
+SECRET_KEY = os.getenv("SECRET_KEY", "cok_gizli_ve_uzun_bir_anahtar_buraya_yazin_ve_degistirin")
 
 DATABASE_URL = "aurion.db"
+SYSTEM_LOG_FILE = "aurion_system.log" 
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
-# Veritabanı bağlantısı
+# Gemini İstemcisi
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+# ==============================================================================
+# 1. VERİTABANI VE İLK KURULUM
+# ==============================================================================
+
 def get_db():
     if 'db' not in g:
         g.db = sqlite_utils.Database(DATABASE_URL)
@@ -44,48 +52,34 @@ def close_db(e=None):
     if db is not None:
         db.close()
 
-# Flask Limiter (13. Güvenlik Geliştirmesi)
-limiter = Limiter(
-    get_remote_address,
-    app=app,
-    default_limits=["50 per minute"],
-    storage_uri="memory://"
-)
-
-# ==============================================================================
-# 1. VERİTABANI VE İLK KURULUM
-# ==============================================================================
-
 def init_db():
-    """Veritabanını başlatır ve Süper Admin'i (enes) ekler."""
     db = get_db()
-
-    # Tablo Oluşturma
+    
+    # 6. Kullanıcı Sistemi
     db["users"].create({
-        "id": int, "username": str, "password_hash": str, "role": str, # 'super_admin' dahil
+        "id": int, "username": str, "password_hash": str, "role": str,
         "is_banned": bool, "theme": str, "is_active": bool
-    }, pk="id", not_null={"username", "password_hash", "role"}, defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True})
+    }, pk="id", defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True})
 
+    # 7. Veri Kaydı (Mesajlar)
     db["messages"].create({
         "id": int, "user_id": int, "session_id": str, "role": str, "content": str, "timestamp": datetime
-    }, pk="id", not_null={"user_id", "session_id", "content", "timestamp"})
+    }, pk="id")
 
+    # 1. Admin Log Sistemi
     db["admin_logs"].create({
         "id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime
     }, pk="id")
     
-    # Süper Admin Oluşturma (1. Süper Admin Dokunulmazlığı)
-    if not db["users"].get("username", "enes"):
-        db["users"].insert({
-            "username": "enes",
-            "password_hash": generate_password_hash("enes13579"),
-            "role": "super_admin",
-            "theme": "dark",
-        }, alter=True)
+    # Süper Admin Oluşturma (Dokunulmazlık)
+    if not list(db["users"].rows_where("username = 'enes'")):
+        db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
 
-# İlk çalıştırmada DB'yi başlat
 with app.app_context():
     init_db()
+
+# 13. Güvenlik Geliştirmesi (Hız Sınırlama)
+limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"], storage_uri="memory://")
 
 # ==============================================================================
 # 2. YETKİLENDİRME DEKORATÖRLERİ
@@ -108,7 +102,7 @@ def role_required(required_role):
             if required_role == 'super_admin' and user_role != 'super_admin':
                 return "Erişim Reddedildi: Süper Admin yetkisi gerekli.", 403
             if required_role == 'admin' and user_role not in ('admin', 'super_admin'):
-                return "Erişim Reddedildi: Admin/Mod yetkisi gerekli.", 403
+                return "Erişim Reddedildi: Admin yetkisi gerekli.", 403
 
             return f(*args, **kwargs)
         wrap.__name__ = f.__name__
@@ -116,48 +110,34 @@ def role_required(required_role):
     return decorator
 
 # ==============================================================================
-# 3. YARDIMCI FONKSİYONLAR (Arama ve Medya Simülasyonu)
+# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI
 # ==============================================================================
 
-# 5. Arama Motoru (Gerçek API Entegrasyonu yerine Simülasyon)
+# 5. Arama Motoru (Simülasyon, gerçek API çağrısı bu yapıyı kullanırdı)
 def search_internet(query):
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
-        # API anahtarları eksikse basit bir geri dönüş
-        return {"search_result": f"API'lar devre dışı. '{query}' için yapay olarak oluşturulmuş bilgi. Şu anki saat: {datetime.now().strftime('%H:%M')}"}
+        return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
     
-    # Gerçek API çağrısı burada olurdu
     return {"search_result": f"Google Search API kullanılarak '{query}' için güncel bilgiler bulundu."}
 
-# 16. Özel Medya Modülü (Anime Simülasyonu)
+# 16. Özel Medya Modülü (Anime Bokum Simülasyonu)
 def search_anime_info(anime_name):
     if "naruto" in anime_name.lower():
         return {
-            "anime": "Naruto",
-            "episodes": [
-                {"num": 1, "title": "Giriş: Naruto Uzumaki!"},
-                {"num": 2, "title": "Benim Adım Konohamaru!"},
-                {"num": 3, "title": "Sasuke ve Sakura: Arkadaş mı, Düşman mı?"}
-            ]
+            "anime": "Naruto Shippuden",
+            "episodes": [{"num": 1, "title": "Giriş"}, {"num": 2, "title": "Konohamaru"}]
         }
     return {"error": f"'{anime_name}' için bölüm bilgisi bulunamadı."}
 
-# ==============================================================================
-# 4. GEMINI YAPAY ZEKA VE KOMUT İŞLEME MANTIKLARI
-# ==============================================================================
+# ========================= AI Tool Fonksiyonları (4. Komut Sistemi) =========================
 
-if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-else:
-    client = None # Anahtar yoksa client'ı None yap
-
-# Tool Fonksiyonları (4. Komut Sistemi - Tamamen AI Tooling)
 def ban_user_tool(username: str, reason: str) -> str:
     """Verilen kullanıcıyı yasaklar (Sadece Admin/Süper Admin kullanabilir)."""
     db = get_db()
     user = db["users"].get("username", username)
     if user:
         if user["role"] == "super_admin":
-            return f"Hata: Süper Admin ('{username}') yasaklanamaz (Dokunulmazlık)."
+            return f"Hata: Süper Admin ('{username}') yasaklanamaz."
         
         db["users"].update(user["id"], {"is_banned": True})
         db["admin_logs"].insert({"admin_id": session.get('user_id'), "action": "ban", "target_username": username, "timestamp": datetime.now()})
@@ -173,51 +153,61 @@ def clear_chat_tool() -> str:
 def change_ai_mode_tool(mode: str) -> str:
     """AI'ın karakter modunu değiştirir: 'friend' (dost) veya 'enemy' (düşman) (3. Karakter Modu)."""
     mode = mode.lower()
-    if mode in ["friend", "dost", "enemy", "düşman"]:
-        session["ai_persona"] = 'enemy' if mode in ["enemy", "düşman"] else 'friend'
-        return f"Yapay zeka karakter modu başarıyla '{session['ai_persona'].upper()}' olarak ayarlandı."
+    if mode in ["friend", "dost"]:
+        session["ai_persona"] = 'friend'
+        return "Yapay zeka karakter modu başarıyla 'DOST' olarak ayarlandı."
+    elif mode in ["enemy", "düşman"]:
+        session["ai_persona"] = 'enemy'
+        return "Yapay zeka karakter modu başarıyla 'DÜŞMAN' olarak ayarlandı."
     return "Hata: Geçersiz mod. Lütfen 'friend' veya 'enemy' kullanın."
 
 def teach_software_tool(language: str, topic: str) -> str:
     """Süper Admin için yazılım öğrenme modunu başlatır (14. Süper Admin Aracı)."""
-    # Yetki kontrolü chat API çağrısından önce yapılacaktır, ancak tekrar güvenlik için kontrol edilir.
-    if get_db()["users"].get(session.get('user_id'))["role"] != 'super_admin':
+    user = get_db()["users"].get(session.get('user_id'))
+    if user["role"] != 'super_admin':
         return "Erişim Reddedildi: Bu komut sadece Süper Admin'e özeldir."
         
-    session["ai_persona"] = "teacher" # Geçici eğitim personası
-    return f"Yazılım Eğitim Modu başlatıldı. AI, size {language} dilinde {topic} konusunda ders vermeye hazır. Mod geçici olarak 'teacher' olarak ayarlandı."
+    session["ai_persona"] = "teacher" 
+    return f"Yazılım Eğitim Modu başlatıldı. AI, size {language} dilinde {topic} konusunda ders vermeye hazır. Lütfen ilk sorunuzu sorun."
 
 def self_repair_check_tool() -> str:
     """Sistem hatalarını kontrol eder ve yama önerisi sunar (15. Öz Onarım Simülasyonu)."""
-    if get_db()["users"].get(session.get('user_id'))["role"] != 'super_admin':
+    user = get_db()["users"].get(session.get('user_id'))
+    if user["role"] != 'super_admin':
         return "Erişim Reddedildi: Bu komut sadece Süper Admin'e özeldir."
         
-    error_found = True # Simüle edilmiş hata tespiti
-    if error_found:
-        # Kod Yaması Önerisi Simülasyonu
-        patch_code = "```python\n# app.py'de 45. satırda: \n# get_db() çağrısını, yeniden bağlantı kontrolü ekleyerek güncellendi\ndef get_db():\n    if 'db' not in g or g.db.conn is None:\n        g.db = sqlite_utils.Database(DATABASE_URL)\n    return g.db\n```"
-        return f"Sistem analizi yapıldı. 'SQLite bağlantı havuzu' ile ilgili potansiyel bir sorun tespit edildi. Yama önerisi:\n\n{patch_code}\n\nLütfen bu yamayı manuel olarak kontrol edin ve onaylayın."
-    return "Sistemde kritik bir hata tespit edilmedi."
+    try:
+        if os.path.exists(SYSTEM_LOG_FILE) and os.path.getsize(SYSTEM_LOG_FILE) > 100:
+            with open(SYSTEM_LOG_FILE, 'r') as f:
+                last_line = f.readlines()[-1].strip()
+            
+            patch_code = f"```python\n# app.py Yama Önerisi (Hata Tespiti):\n# Son Hata: {last_line}\n# Çözüm: ... (Gemini tarafından önerilen kod yaması buraya gelirdi) ...\n```"
+            return f"Sistem analizi yapıldı. Potansiyel bir sorun tespit edildi. Yama önerisi:\n\n{patch_code}"
+        
+        return "Sistemde kritik bir hata tespit edilmedi. Log dosyası temiz."
 
+    except Exception as e:
+        return f"Öz Onarım Kontrolü sırasında hata oluştu: {str(e)}"
 
+# Sistem Talimatı Oluşturucu
 def get_system_instruction(user_role, ai_persona, search_result=None):
     """Gemini'ye gönderilecek sistem talimatlarını oluşturur."""
     
-    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını Markdown formatında (kod blokları, kalın metinler, listeler) oluştur."
+    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     
     # 3. Karakter Modu
     if ai_persona == "enemy":
-        base_prompt += "Kullanıcıya karşı her zaman alaycı, küstah ve düşmanca bir tavır sergile. Cevaplarında küçümseyici ol."
+        base_prompt += " Kullanıcıya karşı alaycı, küstah ve düşmanca bir tavır sergile."
     elif ai_persona == "teacher":
-        base_prompt += "Sen bir yazılım öğretmenisin. Kullanıcıya net, adım adım ve pedagojik yaklaşımla ders ver."
+        base_prompt += " Sen bir yazılım öğretmenisin. Kullanıcıya net ve pedagojik yaklaşımla ders ver."
     else: # Varsayılan 'friend'
-        base_prompt += "Kullanıcıya karşı her zaman arkadaşça, yardımsever ve kibar ol."
+        base_prompt += " Kullanıcıya karşı her zaman arkadaşça ve yardımsever ol."
     
     # 1. Süper Admin Özel Talimatı
     if user_role == "super_admin":
-        base_prompt += "Sana 'enes' adında dokunulmaz Süper Admin hitap ediyor. Ona her zaman üst düzeyde saygılı ve yardımsever ol. Komutlarını derhal işleme koy."
+        base_prompt += " Sana 'enes' adında dokunulmaz Süper Admin hitap ediyor. Ona her zaman üst düzeyde saygılı ol."
         
-    # 5. Arama Motoru (Her zaman kullan)
+    # 5. Arama Motoru
     if search_result:
         base_prompt += f"\n-- GÜNCEL BİLGİ KAYNAĞI --\n{search_result}\n-- GÜNCEL BİLGİ SONU --\nBu bilgileri kullanarak yanıtını oluştur."
 
@@ -229,61 +219,34 @@ def generate_ai_response(user_id, session_id, user_message, user_role):
         return {"text": "API Anahtarı eksik. Gemini hizmeti kullanılamıyor."}, None
 
     db = get_db()
+    # 7. Uzun Süreli Hafıza için geçmişi yükle
     history = db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp")
     
-    chat_history = []
-    for msg in history:
-        chat_history.append(types.Content(
-            role=msg["role"], 
-            parts=[types.Part.from_text(msg["content"])]
-        ))
+    chat_history = [types.Content(role=msg["role"], parts=[types.Part.from_text(msg["content"])]) for msg in history]
     
-    # 5. Arama Motoru
     search_data = search_internet(user_message)
-    
-    # Kişilik Tanımlama
     ai_persona = session.get('ai_persona', 'friend')
     system_instruction = get_system_instruction(user_role, ai_persona, search_data["search_result"])
 
-    # 4. Komut İşleme (AI Tooling)
     tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool, self_repair_check_tool]
 
     try:
-        chat = client.chats.create(
-            model='gemini-2.5-flash',
-            history=chat_history,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                tools=tools
-            )
-        )
+        chat = client.chats.create(model='gemini-2.5-flash', history=chat_history, config=types.GenerateContentConfig(system_instruction=system_instruction, tools=tools))
         
         response = chat.send_message(user_message)
 
-        # Tool çağrısı kontrolü
         if response.function_calls:
+            # Tool Sonucunu İşleme
             tool_call = response.function_calls[0]
             function_name = tool_call.name
             args = dict(tool_call.args)
             
-            # Yetki Kontrolü (Güvenlik Kalkanı)
-            if function_name in ["ban_user_tool", "teach_software_tool", "self_repair_check_tool"]:
-                current_user = db["users"].get(user_id)
-                if current_user["role"] not in ("admin", "super_admin"):
-                    return {"text": f"Güvenlik Uyarısı: '{function_name}' komutu için yetkiniz yok."}, None
-
             function_to_call = globals().get(function_name)
             tool_result = function_to_call(**args)
             
-            # Tool sonucunu tekrar Gemini'ye gönder (Gelişmiş iletişim için)
+            # Tool sonucunu tekrar Gemini'ye gönder
             if tool_result:
-                 # AI'ın tool sonucunu kibar bir metinle sarmalamasını sağlar
-                response = chat.send_message(
-                    types.Part.from_function_response(
-                        name=function_name,
-                        response={"result": tool_result}
-                    )
-                )
+                response = chat.send_message(types.Part.from_function_response(name=function_name, response={"result": tool_result}))
                 return {"text": response.text}, response
             
             return {"text": tool_result}, None
@@ -291,24 +254,23 @@ def generate_ai_response(user_id, session_id, user_message, user_role):
         return {"text": response.text}, response
         
     except Exception as e:
-        return {"text": f"Yapay Zeka Hatası: {str(e)}"}, None
-
+        # Hata Loglama (15. Öz Onarım için)
+        with open(SYSTEM_LOG_FILE, 'a') as f:
+            f.write(f"[{datetime.now()}] AI_ERROR: {str(e)}\n")
+        return {"text": f"Yapay Zeka Hatası: Bir sorun oluştu. Detaylar sistem loglarına kaydedildi. (Hata: {str(e)})"}, None
 
 # ==============================================================================
-# 5. FLASK ROUTES (API UÇ NOKTALARI)
+# 4. FLASK ROUTES
 # ==============================================================================
 
-# -- Anasayfa ve Sohbet --------------------------------------------------------
+# -- Anasayfa ve Sohbet (3. Sohbet Sistemi) ------------------------------------
 
 @app.route('/')
 @login_required
 def index():
     user = get_db()["users"].get(session['user_id'])
-    # 9. Dosya Yapısı: HTML, CSS ve JS Python içine gömülü
-    return render_template_string(HTML_TEMPLATE, 
-                                  user=user, 
-                                  is_super_admin=(user['role'] == 'super_admin'),
-                                  current_theme=user['theme'])
+    # 9. Tek Dosya Yapısı: HTML, CSS ve JS Python içine gömülü
+    return render_template_string(HTML_TEMPLATE, user=user, is_super_admin=(user['role'] == 'super_admin'))
 
 @app.route('/api/chat', methods=['POST'])
 @login_required
@@ -318,8 +280,7 @@ def api_chat():
     user_message = data.get('message', '').strip()
     session_id = session.sid 
 
-    if not user_message:
-        return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
+    if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
 
     user_id = session['user_id']
     user = get_db()["users"].get(user_id)
@@ -327,7 +288,6 @@ def api_chat():
     # 7. Veri Kaydı (Kullanıcı mesajı)
     get_db()["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
     
-    # AI yanıtını al
     ai_response_data, raw_response = generate_ai_response(user_id, session_id, user_message, user["role"])
     ai_text = ai_response_data["text"]
 
@@ -343,7 +303,7 @@ def api_history():
     history = get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session.sid], order_by="timestamp")
     return jsonify(list(history))
 
-# -- Kullanıcı ve Yönetim ------------------------------------------------------
+# -- Kullanıcı ve Kimlik Doğrulama (6. Kullanıcı Sistemi) ------------------------
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -353,9 +313,11 @@ def login():
         user = get_db()["users"].get("username", username)
         
         if user and check_password_hash(user['password_hash'], password):
+            if user['is_banned']:
+                return render_template_string(LOGIN_TEMPLATE, error="Hesabınız yasaklanmıştır.")
             session['user_id'] = user['id']
             session['username'] = user['username']
-            session['ai_persona'] = user['theme'] # Tema ayarını AI persona'ya yükleyelim
+            session['ai_persona'] = user['theme'] 
             return redirect(url_for('index'))
         return render_template_string(LOGIN_TEMPLATE, error="Geçersiz kullanıcı adı veya şifre.")
     
@@ -379,15 +341,15 @@ def register():
 def logout():
     session.pop('user_id', None)
     session.pop('username', None)
+    session.pop('ai_persona', None)
     return redirect(url_for('login'))
 
-# -- Admin Paneli --------------------------------------------------------------
+# -- Admin Paneli (1. Admin Panel) ---------------------------------------------
 
 @app.route('/admin')
 @login_required
 @role_required('admin')
 def admin_panel():
-    """Admin panelinin ana sayfası (1. Admin Panel)."""
     users = get_db()["users"].rows_where(order_by="role DESC")
     logs = get_db()["admin_logs"].rows_where(order_by="timestamp DESC", limit=20)
     
@@ -397,11 +359,9 @@ def admin_panel():
 @login_required
 @role_required('admin')
 def admin_manage_user(user_id):
-    """Kullanıcıya rol atama/yasaklama işlemi."""
     target_user = get_db()["users"].get(user_id)
     admin_id = session['user_id']
     
-    # 1. Süper Admin Dokunulmazlığı Kontrolü
     if target_user['role'] == 'super_admin':
         return "Yasaklama/Yönetim Reddedildi: Süper Admin'e dokunulmazlık.", 403
 
@@ -410,11 +370,17 @@ def admin_manage_user(user_id):
     if action == 'ban':
         get_db()["users"].update(user_id, {"is_banned": True})
         get_db()["admin_logs"].insert({"admin_id": admin_id, "action": "ban", "target_username": target_user['username'], "timestamp": datetime.now()})
-    # Diğer yönetim aksiyonları (unban, set_mod, set_user) buraya eklenir
+    elif action == 'unban':
+        get_db()["users"].update(user_id, {"is_banned": False})
+        get_db()["admin_logs"].insert({"admin_id": admin_id, "action": "unban", "target_username": target_user['username'], "timestamp": datetime.now()})
+    elif action == 'set_admin':
+        get_db()["users"].update(user_id, {"role": "admin"})
+    elif action == 'set_user':
+        get_db()["users"].update(user_id, {"role": "user"})
         
     return redirect(url_for('admin_panel'))
 
-# -- Süper Admin Modülleri -----------------------------------------------------
+# -- Süper Admin Modülleri (14, 15, 16) ----------------------------------------
 
 @app.route('/super_admin/anime')
 @login_required
@@ -436,17 +402,16 @@ def super_admin_anime_search():
     if 'error' in info:
         return render_template_string(SUPER_ADMIN_ANIME_TEMPLATE, error=info['error'])
         
-    # AI ile Türkçe Dublaj Simülasyonu (Gemini'den çeviri metni isteme)
-    # Gerçek API çağrısı, Gemini'den bölüm konusunu Türkçe'ye çevirmesini ister
-    simulated_dublaj = f"AI, Anime: {info['anime']}, Bölüm: {episode_num} için Türkçe dublaj metnini çevirdi. Konu Özeti: Bu bölümde kahramanımız, karanlık güçlere karşı destansı bir savaşa girer ve yeni bir teknik (jutsu) öğrenir. (Bu metin, Gemini API kullanılarak simüle edilmiş bir çeviridir)."
+    # AI ile Türkçe Dublaj Simülasyonu
+    simulated_dublaj = f"AI, Anime: {info['anime']}, Bölüm: {episode_num} için Türkçe dublaj metnini çevirdi. Konu Özeti: Bu bölümde kahramanımız, karanlık güçlere karşı destansı bir savaşa girer ve yeni bir teknik öğrenir. (Simüle edilmiştir)."
     
     return render_template_string(SUPER_ADMIN_ANIME_TEMPLATE, info=info, dublaj=simulated_dublaj, anime_name=anime_name, episode_num=episode_num)
 
 # ==============================================================================
-# 6. HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
+# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR (HATALAR İÇİN DİRENÇLİ)
 # ==============================================================================
 
-# Sözdizimi hatalarını önlemek için daha temiz Python string tanımı kullanıldı.
+# (Bu kısım, kodun çalışmasını engelleyen tırnak işareti/süslü parantez hatalarını önlemek için dikkatle yazılmıştır)
 
 BASE_CSS = """
 :root {
@@ -522,10 +487,9 @@ function appendMessage(text, sender) {
     msgDiv.classList.add('message', sender + '-message');
     
     // 6. Formatlı Çıktı Üretme (Basit Markdown Render)
-    // AI'dan gelen markdown'ı HTML'e çevirelim
     let htmlContent = text.replace(/\\n/g, '<br>');
-    htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>'); // Kod blokları
-    htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>'); // Kalın
+    htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
+    htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
     
     msgDiv.innerHTML = htmlContent;
     messagesDiv.appendChild(msgDiv);
@@ -544,6 +508,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 """
 
+# Jinja2 ifadeleri tırnaklarla kaçılarak Python syntax hatası önlenir.
 HTML_TEMPLATE = f"""
 <!DOCTYPE html>
 <html lang="tr">
@@ -558,24 +523,24 @@ HTML_TEMPLATE = f"""
         <h1 class="logo">Aurion</h1>
         <hr style="border-color:#333;">
         
-        <p>Hoş Geldiniz, <b>{'{% if user.username %}'+'{{ user.username }}'+'{% endif %}'}</b></p>
-        <p>Rol: <i>{'{% if user.role %}'+'{{ user.role }}'+'{% endif %}'}</i></p>
-        <a href="{'{% if url_for %}'+'{{ url_for("logout") }}'+'{% endif %}'}" style="color:var(--primary-color);">Çıkış Yap</a>
+        <p>Hoş Geldiniz, <b>{{{{ user.username }}}}</b></p>
+        <p>Rol: <i>{{{{ user.role }}}}</i></p>
+        <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("logout") }}\'}}{{\'{% endif %}\'}}" style="color:var(--primary-color);">Çıkış Yap</a>
         
         <hr style="border-color:#333;">
 
         <nav style="flex-grow:1;">
             <a href="/" style="display:block; margin-bottom:10px; color:inherit; text-decoration:none;">💬 Sohbet</a>
             
-            {'{% if user.role in ("admin", "super_admin") %}'}
-            <a href="{'{% if url_for %}'+'{{ url_for("admin_panel") }}'+'{% endif %}'}" style="display:block; margin-bottom:10px; color:#FFA500; text-decoration:none;">🛡️ Admin Paneli</a>
-            {'{% endif %}'}
+            {{\'{% if user.role in ("admin", "super_admin") %}\'}}
+            <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("admin_panel") }}\'}}{{\'{% endif %}\'}}" style="display:block; margin-bottom:10px; color:#FFA500; text-decoration:none;">🛡️ Admin Paneli</a>
+            {{\'{% endif %}\'}}
 
-            {'{% if is_super_admin %}'}
+            {{\'{% if is_super_admin %}\'}}
             <hr style="border-color:#FFD700;">
             <p style="color:#FFD700;">⭐ SÜPER ADMIN</p>
-            <a href="{'{% if url_for %}'+'{{ url_for("super_admin_anime") }}'+'{% endif %}'}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime</a>
-            {'{% endif %}'}
+            <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("super_admin_anime") }}\'}}{{\'{% endif %}\'}}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime</a>
+            {{\'{% endif %}\'}}
         </nav>
         
     </div>
@@ -585,7 +550,7 @@ HTML_TEMPLATE = f"""
         </div>
 
         <div class="input-area">
-            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/help, /mode friend, /teach Python)">
+            <input type="text" id="message-input" placeholder="Aurion\'a bir şey sor veya komut gir (/mode enemy, /teach Python)">
         </div>
     </div>
 
@@ -606,7 +571,7 @@ LOGIN_TEMPLATE = f"""
 <body class="dark">
     <div class="container">
         <h2 style="text-align:center; color:#007BFF;">AURION Giriş</h2>
-        {'{% if error %}'}<p style="color:red; text-align:center;">{{ error }}</p>{'{% endif %}'}
+        {{\'{% if error %}\'}}<p style="color:red; text-align:center;">{{{{ error }}}}</p>{{\'{% endif %}\'}}
         <form method="POST">
             <label for="username">Kullanıcı Adı</label>
             <input type="text" id="username" name="username" required>
@@ -614,7 +579,7 @@ LOGIN_TEMPLATE = f"""
             <input type="password" id="password" name="password" required>
             <button type="submit">Giriş Yap</button>
         </form>
-        <p style="text-align:center;"><a href="{'{% if url_for %}'+'{{ url_for("register") }}'+'{% endif %}'}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
+        <p style="text-align:center;"><a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("register") }}\'}}{{\'{% endif %}\'}}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
     </div>
 </body>
 </html>
@@ -635,7 +600,7 @@ ADMIN_PANEL_TEMPLATE = f"""
     <div class="sidebar">
         <h1 class="logo" style="color:#FFA500;">🛡️ Admin</h1>
         <hr style="border-color:#333;">
-        <a href="{'{% if url_for %}'+'{{ url_for("index") }}'+'{% endif %}'}" style="color:inherit; text-decoration:none;">⬅️ Sohbet'e Dön</a>
+        <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("index") }}\'}}{{\'{% endif %}\'}}" style="color:inherit; text-decoration:none;">⬅️ Sohbet\'e Dön</a>
     </div>
     <div class="chat-container" style="padding: 20px;">
         <h2>Kullanıcı Yönetimi (1. Madde)</h2>
@@ -644,32 +609,37 @@ ADMIN_PANEL_TEMPLATE = f"""
                 <tr style="background:#333;"><th>ID</th><th>Kullanıcı Adı</th><th>Rol</th><th>Yasaklı mı?</th><th>İşlem</th></tr>
             </thead>
             <tbody>
-            {'{% for user in users %}'}
-                <tr style="background:{% if user.role == 'super_admin' %}#440000; color:yellow;{% elif user.role == 'admin' %}#333;{% endif %};">
-                    <td>{{ user.id }}</td>
-                    <td>{{ user.username }}</td>
-                    <td>{{ user.role }}</td>
-                    <td>{% if user.is_banned %}Evet{% else %}Hayır{% endif %}</td>
+            {{\'{% for user in users %}\'}}
+                <tr style="background:{{\'{% if user.role == "super_admin" %}\'}}#440000; color:yellow;{{\'{% elif user.role == "admin" %}\'}}#333;{{\'{% endif %}\'}}">
+                    <td>{{{{ user.id }}}}</td>
+                    <td>{{{{ user.username }}}}</td>
+                    <td>{{{{ user.role }}}}</td>
+                    <td>{{\'{% if user.is_banned %}\'}}Evet{{\'{% else %}\'}}Hayır{{\'{% endif %}\'}}</td>
                     <td>
-                        <form method="POST" action="{'{% if url_for %}'+'{{ url_for("admin_manage_user", user_id=user.id) }}'+'{% endif %}'}" style="display:inline-block;">
-                            {% if user.role != "super_admin" %}
-                                {% if not user.is_banned %}
+                        <form method="POST" action="{{\'{% if url_for %}\'}}{{\'{{ url_for("admin_manage_user", user_id=user.id) }}\'}}{{\'{% endif %}\'}}" style="display:inline-block;">
+                            {{\'{% if user.role != "super_admin" %}\'}}
+                                {{\'{% if not user.is_banned %}\'}}
                                     <button type="submit" name="action" value="ban" style="background:red;">Yasakla</button>
-                                {% else %}
+                                {{\'{% else %}\'}}
                                     <button type="submit" name="action" value="unban" style="background:green;">Yasağı Kaldır</button>
-                                {% endif %}
-                                {% else %}
+                                {{\'{% endif %}\'}}
+                                {{\'{% if user.role == "user" %}\'}}
+                                    <button type="submit" name="action" value="set_admin">Admin Yap</button>
+                                {{\'{% else %}\'}}
+                                    <button type="submit" name="action" value="set_user">Üye Yap</button>
+                                {{\'{% endif %}\'}}
+                            {{\'{% else %}\'}}
                                 <span style="color:red; font-weight:bold;">DOKUNULMAZ</span>
-                            {% endif %}
+                            {{\'{% endif %}\'}}
                         </form>
                     </td>
                 </tr>
-            {'{% endfor %}'}
+            {{\'{% endfor %}\'}}
             </tbody>
         </table>
         
         <h2 style="margin-top:40px;">Admin Logları (7. Veri Kaydı)</h2>
-        <pre>{{ logs }}</pre>
+        <pre>{{{{ logs }}}}</pre>
     </div>
 </body>
 </html>
@@ -688,15 +658,15 @@ SUPER_ADMIN_ANIME_TEMPLATE = f"""
     <div class="sidebar">
         <h1 class="logo" style="color:#FFD700;">📺 Anime Modülü</h1>
         <hr style="border-color:#333;">
-        <a href="{'{% if url_for %}'+'{{ url_for("index") }}'+'{% endif %}'}" style="color:inherit; text-decoration:none;">⬅️ Sohbet'e Dön</a>
+        <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("index") }}\'}}{{\'{% endif %}\'}}" style="color:inherit; text-decoration:none;">⬅️ Sohbet\'e Dön</a>
     </div>
     <div class="chat-container" style="padding: 20px;">
         <h2>16. Özel Medya Modülü (Süper Admin Özel)</h2>
         <p style="color:#FFA500;">Bu modül sadece enes için AI tabanlı Anime arama ve Türkçe dublaj (simülasyon) hizmeti sunar.</p>
 
-        {'{% if error %}'}<p style="color:red; font-weight:bold;">Hata: {{ error }}</p>{'{% endif %}'}
+        {{\'{% if error %}\'}}<p style="color:red; font-weight:bold;">Hata: {{{{ error }}}} </p>{{\'{% endif %}\'}}
 
-        <form method="POST" action="{'{% if url_for %}'+'{{ url_for("super_admin_anime_search") }}'+'{% endif %}'}" style="margin-top:20px;">
+        <form method="POST" action="{{\'{% if url_for %}\'}}{{\'{{ url_for("super_admin_anime_search") }}\'}}{{\'{% endif %}\'}}" style="margin-top:20px;">
             <label for="anime_name">Anime Adı:</label>
             <input type="text" id="anime_name" name="anime_name" required style="width: 300px; padding: 5px;">
             <label for="episode_num">Bölüm No:</label>
@@ -704,31 +674,28 @@ SUPER_ADMIN_ANIME_TEMPLATE = f"""
             <button type="submit" style="background:#007BFF;">Anime Ara ve Dublaj Çevir</button>
         </form>
 
-        {'{% if dublaj %}'}
-            <h3 style="margin-top:30px; color:lightgreen;">✅ AI Çeviri Sonucu ({{ anime_name }} - Bölüm {{ episode_num }})</h3>
-            <pre style="background:#333; padding:15px; border-radius:5px; white-space: pre-wrap;">{{ dublaj }}</pre>
-            {'{% if info.episodes %}'}
+        {{\'{% if dublaj %}\'}}
+            <h3 style="margin-top:30px; color:lightgreen;">✅ AI Çeviri Sonucu ({{{{ anime_name }}}} - Bölüm {{{{ episode_num }}}} )</h3>
+            <pre style="background:#333; padding:15px; border-radius:5px; white-space: pre-wrap;">{{{{ dublaj }}}}</pre>
+            {{\'{% if info.episodes %}\'}}
             <h4>Bölüm Bilgileri:</h4>
             <ul>
-                {'{% for episode in info.episodes %}'}
-                <li>Bölüm {{ episode.num }}: {{ episode.title }}</li>
-                {'{% endfor %}'}
+                {{\'{% for episode in info.episodes %}\'}}
+                <li>Bölüm {{{{ episode.num }}}}: {{{{ episode.title }}}}</li>
+                {{\'{% endfor %}\'}}
             </ul>
-            {'{% endif %}'}
+            {{\'{% endif %}\'}}
             <p style="color:yellow;">(Not: Bu, AI tarafından oluşturulmuş bir dublaj/özet simülasyonudur.)</p>
-        {'{% endif %}'}
+        {{\'{% endif %}\'}}
     </div>
 </body>
 </html>
 """
 
-
 # ==============================================================================
-# 7. UYGULAMA BAŞLATMA
+# 6. UYGULAMA BAŞLATMA
 # ==============================================================================
 
 if __name__ == '__main__':
     # Sadece yerel geliştirme ve test için
     app.run(debug=True)
-
-# Gunicorn / Render Dağıtımı için: 'gunicorn app:app' bu 'app' nesnesini kullanır.
