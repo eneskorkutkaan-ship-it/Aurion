@@ -1,0 +1,7 @@
+Flask
+gunicorn
+python-dotenv
+flask-limiter
+sqlite-utils
+google-genai
+requests
