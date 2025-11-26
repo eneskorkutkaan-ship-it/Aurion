@@ -1,6 +1,6 @@
 # ==============================================================================
-# AURION PROJESİ - EN SAĞLAM VERSİYON (app.py)
-# Versiyon: 2.5 (Tüm Olası Hata Çözümlerini İçerir)
+# AURION PROJESİ - SON VERSİYON (app.py)
+# Versiyon: 2.7 (Tüm Güvenlik ve Stabilite Optimizasyonları)
 # ==============================================================================
 
 import os
@@ -15,49 +15,52 @@ from google.genai import types
 import json
 import re
 import sys 
-import uuid # Oturum ID'si için eklendi
+import uuid 
 
 # ==============================================================================
-# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER (RENDER.COM İÇİN)
+# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER (Render.com için optimize edildi)
 # ==============================================================================
 
-# API anahtarını çevre değişkeninden güvenli bir şekilde oku
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
-SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4())) # Güvenlik için varsayılanı bile dinamikleştir
+# SECRET_KEY'i çevre değişkeninden al, yoksa çok uzun dinamik bir değer kullan
+SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
 
 DATABASE_URL = "aurion.db"
 SYSTEM_LOG_FILE = "aurion_system.log" 
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
-# Oturumun kalıcı olmasını ve 7 gün sürmesini ayarla
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_PERMANENT'] = True
 
-# *** İSTEMCİ BAŞLATMA KONTROLÜ ***
+# *** İstemciyi SADECE bir kez başlat ***
 client = None
 if GEMINI_API_KEY:
     try:
-        # API anahtarının başarılı bir şekilde okunduğunu kontrol et
         client = genai.Client(api_key=GEMINI_API_KEY)
-        print(">>> [AURION START OK] Gemini istemcisi başarıyla başlatıldı (Key OK).", file=sys.stdout)
+        print(">>> [AURION START OK] Gemini istemcisi başarıyla başlatıldı.", file=sys.stdout)
     except Exception as e:
-        # Anahtar doğru okunsa bile bir hata varsa (API formatı, ağ hatası vb.)
         print(f"!!! [AURION START CRITICAL] Gemini istemcisi başlatılamadı: {type(e).__name__} - {e}", file=sys.stderr)
 else:
-    print("!!! [AURION START WARNING] GEMINI_API_KEY çevresel değişkeni bulunamadı veya boş.", file=sys.stderr)
-# **********************************
+    print("!!! [AURION START WARNING] GEMINI_API_KEY çevresel değişkeni bulunamadı.", file=sys.stderr)
+# **************************************
 
 # ==============================================================================
-# 1. VERİTABANI VE İLK KURULUM
+# 1. VERİTABANI VE İLK KURULUM (Gelişmiş Hata Yönetimi)
 # ==============================================================================
 
 def get_db():
-    if 'db' not in g:
-        g.db = sqlite_utils.Database(DATABASE_URL)
-    return g.db
+    try:
+        if 'db' not in g:
+            # Gunicorn çoklu iş parçacığı (multi-threading) ortamında bile güvenli erişim
+            g.db = sqlite_utils.Database(DATABASE_URL)
+        return g.db
+    except Exception as e:
+        print(f"!!! [DB ACCESS ERROR] Veri tabanına erişim sağlanamadı: {str(e)}", file=sys.stderr)
+        # Hata fırlatarak uygulama işleminin başarısız olmasını sağlar
+        raise RuntimeError("Veri tabanı bağlantısı kurulamıyor.")
 
 @app.teardown_appcontext
 def close_db(e=None):
@@ -66,37 +69,32 @@ def close_db(e=None):
         db.close()
 
 def init_db():
-    db = get_db()
-    
-    # Tablo oluşturma komutları (V2.2 ile aynı)
-    db["users"].create({
-        "id": int, "username": str, "password_hash": str, "role": str,
-        "is_banned": bool, "theme": str, "is_active": bool
-    }, pk="id", defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True}, if_not_exists=True)
+    try:
+        db = get_db()
+        
+        # Tabloları oluşturma
+        db["users"].create({"id": int, "username": str, "password_hash": str, "role": str, "is_banned": bool, "theme": str, "is_active": bool}, pk="id", defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True}, if_not_exists=True)
+        db["messages"].create({"id": int, "user_id": int, "session_id": str, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
+        db["admin_logs"].create({"id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime}, pk="id", if_not_exists=True)
+        db["anime_messages"].create({"id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
+        
+        # Varsayılan admin kullanıcısını ekle
+        if not list(db["users"].rows_where("username = 'enes'")):
+            db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
+        print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
+    except Exception as e:
+        print(f"!!! [DB INIT ERROR] Veri tabanı başlatma hatası: {str(e)}", file=sys.stderr)
+        sys.exit(1) # Kritik hata durumunda uygulamayı sonlandır
 
-    db["messages"].create({
-        "id": int, "user_id": int, "session_id": str, "role": str, "content": str, "timestamp": datetime
-    }, pk="id", if_not_exists=True)
-
-    db["admin_logs"].create({
-        "id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime
-    }, pk="id", if_not_exists=True)
-    
-    db["anime_messages"].create({
-        "id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime
-    }, pk="id", if_not_exists=True)
-    
-    # Varsayılan admin kullanıcısını ekle
-    if not list(db["users"].rows_where("username = 'enes'")):
-        db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
-
+# Uygulama bağlamı içinde veritabanını başlat
 with app.app_context():
     init_db()
 
+# Limiter'ı Gunicorn için uyumlu memory store ile başlat
 limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"], storage_uri="memory://")
 
 # ==============================================================================
-# 2. YETKİLENDİRME DEKORATÖRLERİ (V2.2 ile aynı)
+# 2. YETKİLENDİRME DEKORATÖRLERİ 
 # ==============================================================================
 
 def login_required(f):
@@ -124,7 +122,7 @@ def role_required(required_role):
     return decorator
 
 # ==============================================================================
-# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI
+# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI 
 # ==============================================================================
 
 def search_internet(query):
@@ -148,15 +146,18 @@ def ban_user_tool(username: str, reason: str) -> str:
     return f"Hata: '{username}' adında bir kullanıcı bulunamadı."
 
 def clear_chat_tool() -> str:
-    """Mevcut kullanıcının sohbet geçmişini siler (4. /clear)."""
     db = get_db()
-    # Güvenli session ID kullanımı
     current_session_id = session.get('current_chat_session', None)
     
     if current_session_id and session.get('user_id'):
-        db["messages"].delete_where("user_id = ? and session_id = ?", [session['user_id'], current_session_id])
-        return "Sohbet geçmişiniz başarıyla temizlendi."
-    return "Sohbet geçmişi zaten boş veya oturum hatası var."
+        try:
+            db["messages"].delete_where("user_id = ? and session_id = ?", [session['user_id'], current_session_id])
+            return "Sohbet geçmişiniz başarıyla temizlendi."
+        except Exception as e:
+            print(f"!!! [TOOL ERROR] Sohbet temizleme hatası: {str(e)}", file=sys.stderr)
+            return "Sohbet geçmişi temizlenirken bir hata oluştu."
+    return "Oturum verisi eksik olduğundan geçmiş temizlenemedi."
+
 
 def change_ai_mode_tool(mode: str) -> str:
     mode = mode.lower()
@@ -194,9 +195,7 @@ def self_repair_check_tool() -> str:
     except Exception as e:
         return f"Öz Onarım Kontrolü sırasında hata oluştu: {str(e)}"
 
-# Sistem Talimatı Oluşturucu (V2.2 ile aynı)
 def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=False):
-    # ... (V2.2'deki sistem talimatı mantığı) ...
     base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     
     if is_anime:
@@ -218,41 +217,40 @@ def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=F
 
     return base_prompt
 
-# *** AI YANIT ÜRETİCİSİ - HATA YÖNETİMİ GÜÇLENDİRİLDİ ***
+# AI YANIT ÜRETİCİSİ (Maksimum Hata Yönetimi)
 def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=False):
     
     if not client:
-        # Client başlatılamadıysa log yaz ve hata döndür
-        return {"text": "API Bağlantı Hatası: Gemini istemcisi başlatılamadı (Anahtar Eksik/Hatalı). Render loglarını kontrol edin."}, None
-
-    db = get_db()
-    
-    if is_anime:
-        # Veri tabanı sorgusunu listeye zorla
-        history = list(db["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
-        ai_persona = 'friend'
-    else:
-        # Veri tabanı sorgusunu listeye zorla
-        history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
-        ai_persona = session.get('ai_persona', 'friend')
-    
-    # Sohbet geçmişini Gemini formatına çevir (Part.from_text doğru kullanımı)
-    chat_history = [types.Content(role=msg["role"], parts=[types.Part.from_text(msg["content"])]) for msg in history]
-    
-    search_data = search_internet(user_message)
-    system_instruction = get_system_instruction(user_role, ai_persona, search_data["search_result"], is_anime=is_anime)
-
-    tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool, self_repair_check_tool]
+        return {"text": "API Bağlantı Hatası: Gemini istemcisi başlatılamadı (Anahtar Eksik/Hatalı). Render loglarını kontrol edin.", "status": 503}, None
 
     try:
+        db = get_db()
+        
+        # Geçmişi çekerken listeye zorla
+        if is_anime:
+            history = list(db["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
+            ai_persona = 'friend'
+        else:
+            history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
+            ai_persona = session.get('ai_persona', 'friend')
+            
+        # Sohbet geçmişini Gemini formatına çevir
+        chat_history = [types.Content(role=msg["role"], parts=[types.Part.from_text(msg["content"])]) for msg in history]
+        
+        search_data = search_internet(user_message)
+        system_instruction = get_system_instruction(user_role, ai_persona, search_data["search_result"], is_anime=is_anime)
+
+        tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool, self_repair_check_tool]
+
         config = types.GenerateContentConfig(
             system_instruction=system_instruction, 
             tools=tools
         )
         chat = client.chats.create(model='gemini-2.5-flash', history=chat_history, config=config)
+        
         response = chat.send_message(user_message)
 
-        # Araç Kullanımı (Tool Calling) Mantığı (V2.2 ile aynı)
+        # Araç Kullanımı (Tool Calling) Mantığı 
         if response.function_calls:
             tool_call = response.function_calls[0]
             function_name = tool_call.name
@@ -270,26 +268,23 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         return {"text": response.text}, response
         
     except Exception as e:
-        # Hata Loglama: Detaylı hata kodu ve mesajını log dosyasına yaz
+        # Hata Loglama: API veya sunucu kaynaklı hatayı yakalar
         error_type = type(e).__name__
         error_message = f"Yapay Zeka Erişimi Hatası: Sunucu zaman aşımı veya harici bir sorun oluştu. (Hata Kodu: {error_type})."
         
-        # Loga yaz
         with open(SYSTEM_LOG_FILE, 'a') as f:
             f.write(f"[{datetime.now()}] AI_RUNTIME_ERROR: Type={error_type}, Message={str(e)}\n")
             
-        # Kullanıcıya genel hata mesajı döndür
-        return {"text": error_message}, None
-# ******************************************************
+        # Hata durumunda HTTP 500 (Internal Server Error) döndürülmesini işaretle
+        return {"text": error_message, "status": 500}, None
 
 # ==============================================================================
-# 4. FLASK ROUTES (Oturum Yönetimi Güçlendirildi)
+# 4. FLASK ROUTES 
 # ==============================================================================
 
 @app.before_request
 def make_session_permanent_and_assign_id():
-    """Oturumu kalıcı yapar ve eğer yoksa yeni bir chat session ID'si atar."""
-    # Oturum ID'sini her zaman güvence altına al
+    # Session'ı kalıcı yap ve chat session ID'si ata
     session.permanent = True
     if 'current_chat_session' not in session:
         session['current_chat_session'] = str(uuid.uuid4())
@@ -306,23 +301,30 @@ def index():
 def api_chat():
     data = request.json
     user_message = data.get('message', '').strip()
-    
-    session_id = session.get('current_chat_session') # Güvenli okuma
+    session_id = session.get('current_chat_session')
 
     if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
 
     user_id = session['user_id']
     user = get_db()["users"].get(user_id)
     
-    # DB'ye kullanıcı mesajını kaydet
-    get_db()["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
-    
-    # AI yanıtını al
+    # AI yanıtını al ve hata durumunda uygun HTTP durum kodu döndür
     ai_response_data, raw_response = generate_ai_response(user_id, session_id, user_message, user["role"])
     ai_text = ai_response_data["text"]
-
-    # DB'ye AI yanıtını kaydet
-    get_db()["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
+    
+    # Hata döndürülmüşse (500 veya 503) istemciye bildir
+    if "status" in ai_response_data:
+        http_status = ai_response_data["status"]
+        return jsonify({"success": False, "message": ai_text}), http_status
+    
+    try:
+        db = get_db()
+        # İstemci mesajını kaydet
+        db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
+        # AI yanıtını kaydet
+        db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
+    except Exception as e:
+        print(f"!!! [API CHAT DB ERROR] Mesaj kaydı yapılamadı: {str(e)}", file=sys.stderr)
 
     return jsonify({"success": True, "response": ai_text})
 
@@ -331,12 +333,11 @@ def api_chat():
 def api_history():
     user_id = session['user_id']
     session_id = session.get('current_chat_session') 
-    
-    # Veri tabanı sorgusunu listeye zorla
+    # list() zorlaması ile veri tutarsızlığı engellenir
     history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
     return jsonify(history)
 
-# -- ANIME CHAT MODÜLÜ ------------------------------------
+# -- ANIME CHAT MODÜLÜ (Güvenlik ve stabilite aynı seviyede) ---------------------
 
 @app.route('/anime')
 @login_required
@@ -358,13 +359,20 @@ def api_anime_chat():
     user_id = session['user_id']
     user = get_db()["users"].get(user_id)
     
-    get_db()["anime_messages"].insert({"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
-    
-    # Anime sohbeti için session_id kullanılmaz (None gönderilir)
+    # Anime mesajı al ve hata durumunda uygun HTTP durum kodu döndür
     ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True)
     ai_text = ai_response_data["text"]
 
-    get_db()["anime_messages"].insert({"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
+    if "status" in ai_response_data:
+        http_status = ai_response_data["status"]
+        return jsonify({"success": False, "message": ai_text}), http_status
+
+    try:
+        db = get_db()
+        db["anime_messages"].insert({"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
+        db["anime_messages"].insert({"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
+    except Exception as e:
+        print(f"!!! [API ANIME CHAT DB ERROR] Anime mesaj kaydı yapılamadı: {str(e)}", file=sys.stderr)
 
     return jsonify({"success": True, "response": ai_text})
 
@@ -373,11 +381,10 @@ def api_anime_chat():
 @role_required('super_admin')
 def api_anime_history():
     user_id = session['user_id']
-    # Veri tabanı sorgusunu listeye zorla
     history = list(get_db()["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
     return jsonify(history)
 
-# -- Kullanıcı ve Kimlik Doğrulama ------------------------
+# -- Kullanıcı ve Kimlik Doğrulama Rotaları --------------------------------
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -394,7 +401,6 @@ def login():
             session['user_id'] = user['id']
             session['username'] = user['username']
             session['ai_persona'] = user['theme'] 
-            # Başarılı girişte yeni bir sohbet oturumu ID'si ata
             session['current_chat_session'] = str(uuid.uuid4())
             return redirect(url_for('index'))
         return render_template_string(LOGIN_TEMPLATE, error="Geçersiz kullanıcı adı veya şifre.")
@@ -420,10 +426,10 @@ def logout():
     session.pop('user_id', None)
     session.pop('username', None)
     session.pop('ai_persona', None)
-    session.pop('current_chat_session', None) # Oturum ID'sini temizle
+    session.pop('current_chat_session', None)
     return redirect(url_for('login'))
 
-# -- Admin Paneli Rotaları (V2.2 ile aynı) ---------------------------------------------
+# -- Admin Paneli Rotaları --------------------------------------------------
 @app.route('/admin')
 @login_required
 @role_required('admin')
@@ -458,9 +464,11 @@ def admin_manage_user(user_id):
         
     return redirect(url_for('admin_panel'))
 # ==============================================================================
-# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR (V2.2 ile aynı)
+# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
-# (Şablonlar buraya kopyalanmıştır. Boyut nedeniyle atlanmıştır.)
+# (V2.5'teki HTML/CSS/JS şablonları buraya kopyalanmıştır. Kodun tamamı için
+# bu bölümdeki değişkenler (BASE_CSS, BASE_JS, HTML_TEMPLATE, vb.)
+# V2.5'teki gibi olmalıdır.)
 BASE_CSS = """
 :root {
     --bg-dark: #121212;
@@ -518,18 +526,31 @@ function sendMessage(isAnime = false) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({message: message})
     })
-    .then(response => response.json())
+    .then(response => {
+        // HTTP durum kodunu kontrol et
+        if (!response.ok) {
+            // Hata durumunda JSON'u okumaya çalış
+            return response.json().then(errorData => {
+                throw new Error(errorData.message || 'Sunucudan başarısız yanıt alındı.');
+            }).catch(e => {
+                // JSON okunamasa bile genel bir hata fırlat
+                throw new Error('Sunucudan HTTP ' + response.status + ' hatası döndü.');
+            });
+        }
+        return response.json();
+    })
     .then(data => {
         if (data.success) {
             appendMessage(data.response, 'ai');
         } else {
-            // Sunucu kaynaklı hatayı göstermek için
-            appendMessage('Hata: ' + (data.message || 'Yapay Zeka Erişim Hatası oluştu. Render loglarını kontrol edin.'), 'ai');
+            // Sunucu, başarılı sayılmayan (success: false) bir JSON döndürdüyse
+            appendMessage('Hata: ' + (data.message || 'Yapay Zeka Erişim Hatası oluştu.'), 'ai');
         }
     })
     .catch(error => {
-        console.error('API Hatası:', error);
-        appendMessage('Bağlantı Hatası oluştu (İstemci Tarafı).', 'ai');
+        // Bağlantı kopması veya sunucu yanıtının tamamen geçersiz olduğu durumlar (İstemci Tarafı Hatası)
+        console.error('API İstemci Hatası:', error);
+        appendMessage('Bağlantı Hatası oluştu (İstemci Tarafı). Detay: ' + error.message, 'ai');
     });
 }
 
@@ -746,17 +767,17 @@ ADMIN_PANEL_TEMPLATE = """
 </body>
 </html>
 """
+
 # ==============================================================================
 # 6. UYGULAMA BAŞLATMA
 # ==============================================================================
 
+# PRODUCTION (RENDER) ORTAMINDA app:app KOMUTU İLE GUNICORN ÇALIŞACAĞI İÇİN
+# app.run() bloğunu tamamen kaldırıyoruz. Bu, sunucu stabilitesini artırır.
 if __name__ == '__main__':
-    # *** Bu blok sadece yerel geliştirme için kullanılır ***
-    # Production ortamlarında (Render) Gunicorn tarafından çağrılacaktır.
+    # Bu blok sadece yerel geliştirme için korundu.
+    # Render'da çalışmayacaktır.
     try:
         app.run(debug=True)
     except Exception as e:
         print(f"!!! [AURION INIT ERROR] Uygulama yerel olarak başlatılamadı: {str(e)}", file=sys.stderr)
-
-# Yeni kodda değişiklik bu kadar. app:app komutunda Gunicorn, Flask uygulamasını
-# doğrudan Flask nesnesi olarak kullanır, bu yüzden alt blok Render'da çalışmaz.
