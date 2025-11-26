@@ -1,6 +1,6 @@
 # ==============================================================================
 # AURION PROJESİ - SON VERSİYON (app.py)
-# Versiyon: 2.7 (Tüm Güvenlik ve Stabilite Optimizasyonları)
+# Versiyon: 2.8 (SQLite Kilitleme ve Bağlantı Hatası Çözümü - TAM KOD)
 # ==============================================================================
 
 import os
@@ -16,15 +16,15 @@ import json
 import re
 import sys 
 import uuid 
+import time # <<< KRİTİK İÇE AKTARMA: İkinci isteklerdeki hatayı gidermek için eklendi.
 
 # ==============================================================================
-# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER (Render.com için optimize edildi)
+# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER 
 # ==============================================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
-# SECRET_KEY'i çevre değişkeninden al, yoksa çok uzun dinamik bir değer kullan
 SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
 
 DATABASE_URL = "aurion.db"
@@ -35,7 +35,6 @@ app.secret_key = SECRET_KEY
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_PERMANENT'] = True
 
-# *** İstemciyi SADECE bir kez başlat ***
 client = None
 if GEMINI_API_KEY:
     try:
@@ -45,22 +44,30 @@ if GEMINI_API_KEY:
         print(f"!!! [AURION START CRITICAL] Gemini istemcisi başlatılamadı: {type(e).__name__} - {e}", file=sys.stderr)
 else:
     print("!!! [AURION START WARNING] GEMINI_API_KEY çevresel değişkeni bulunamadı.", file=sys.stderr)
-# **************************************
 
 # ==============================================================================
-# 1. VERİTABANI VE İLK KURULUM (Gelişmiş Hata Yönetimi)
+# 1. VERİTABANI VE İLK KURULUM (SQLite Yeniden Deneme Mantığı)
 # ==============================================================================
 
-def get_db():
-    try:
-        if 'db' not in g:
-            # Gunicorn çoklu iş parçacığı (multi-threading) ortamında bile güvenli erişim
-            g.db = sqlite_utils.Database(DATABASE_URL)
-        return g.db
-    except Exception as e:
-        print(f"!!! [DB ACCESS ERROR] Veri tabanına erişim sağlanamadı: {str(e)}", file=sys.stderr)
-        # Hata fırlatarak uygulama işleminin başarısız olmasını sağlar
-        raise RuntimeError("Veri tabanı bağlantısı kurulamıyor.")
+def get_db(max_retries=3, delay=1):
+    """Veritabanı bağlantısını döndürür ve kilitlenme (OperationalError) durumunda yeniden dener."""
+    for attempt in range(max_retries):
+        try:
+            if 'db' not in g:
+                # Gunicorn için uyumlu timeout ve bağlantı ayarları
+                g.db = sqlite_utils.Database(DATABASE_URL, timeout=10) 
+            return g.db
+        except sqlite_utils.db.OperationalError as e:
+            # OperationalError (DB kilitlenme hatası)
+            print(f"!!! [DB ACCESS RETRY] DB kilitlenme hatası. Yeniden deneme ({attempt + 1}/{max_retries}). Hata: {str(e)}", file=sys.stderr)
+            if attempt < max_retries - 1:
+                time.sleep(delay) # <<< time.sleep komutunu kullanmak için 'import time' gereklidir.
+            else:
+                raise RuntimeError("Veri tabanı bağlantısı kurulamıyor (Maksimum deneme aşıldı).")
+        except Exception as e:
+            # Diğer tüm hatalar
+            print(f"!!! [DB ACCESS ERROR] Veri tabanına erişim sağlanamadı: {str(e)}", file=sys.stderr)
+            raise RuntimeError("Veri tabanı bağlantısı kurulamıyor.")
 
 @app.teardown_appcontext
 def close_db(e=None):
@@ -71,26 +78,21 @@ def close_db(e=None):
 def init_db():
     try:
         db = get_db()
-        
-        # Tabloları oluşturma
         db["users"].create({"id": int, "username": str, "password_hash": str, "role": str, "is_banned": bool, "theme": str, "is_active": bool}, pk="id", defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True}, if_not_exists=True)
         db["messages"].create({"id": int, "user_id": int, "session_id": str, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         db["admin_logs"].create({"id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         db["anime_messages"].create({"id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         
-        # Varsayılan admin kullanıcısını ekle
         if not list(db["users"].rows_where("username = 'enes'")):
             db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
     except Exception as e:
         print(f"!!! [DB INIT ERROR] Veri tabanı başlatma hatası: {str(e)}", file=sys.stderr)
-        sys.exit(1) # Kritik hata durumunda uygulamayı sonlandır
+        sys.exit(1)
 
-# Uygulama bağlamı içinde veritabanını başlat
 with app.app_context():
     init_db()
 
-# Limiter'ı Gunicorn için uyumlu memory store ile başlat
 limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"], storage_uri="memory://")
 
 # ==============================================================================
@@ -128,7 +130,6 @@ def role_required(required_role):
 def search_internet(query):
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
-    
     return {"search_result": f"Google Search API kullanılarak '{query}' için güncel bilgiler bulundu."}
 
 def ban_user_tool(username: str, reason: str) -> str:
@@ -217,7 +218,6 @@ def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=F
 
     return base_prompt
 
-# AI YANIT ÜRETİCİSİ (Maksimum Hata Yönetimi)
 def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=False):
     
     if not client:
@@ -226,7 +226,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
     try:
         db = get_db()
         
-        # Geçmişi çekerken listeye zorla
         if is_anime:
             history = list(db["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
             ai_persona = 'friend'
@@ -234,7 +233,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
             ai_persona = session.get('ai_persona', 'friend')
             
-        # Sohbet geçmişini Gemini formatına çevir
         chat_history = [types.Content(role=msg["role"], parts=[types.Part.from_text(msg["content"])]) for msg in history]
         
         search_data = search_internet(user_message)
@@ -250,7 +248,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         
         response = chat.send_message(user_message)
 
-        # Araç Kullanımı (Tool Calling) Mantığı 
         if response.function_calls:
             tool_call = response.function_calls[0]
             function_name = tool_call.name
@@ -268,23 +265,20 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         return {"text": response.text}, response
         
     except Exception as e:
-        # Hata Loglama: API veya sunucu kaynaklı hatayı yakalar
         error_type = type(e).__name__
         error_message = f"Yapay Zeka Erişimi Hatası: Sunucu zaman aşımı veya harici bir sorun oluştu. (Hata Kodu: {error_type})."
         
         with open(SYSTEM_LOG_FILE, 'a') as f:
             f.write(f"[{datetime.now()}] AI_RUNTIME_ERROR: Type={error_type}, Message={str(e)}\n")
             
-        # Hata durumunda HTTP 500 (Internal Server Error) döndürülmesini işaretle
         return {"text": error_message, "status": 500}, None
 
 # ==============================================================================
-# 4. FLASK ROUTES 
+# 4. FLASK ROUTES (DB Yazma İşlemlerine Yeniden Deneme Eklendi)
 # ==============================================================================
 
 @app.before_request
 def make_session_permanent_and_assign_id():
-    # Session'ı kalıcı yap ve chat session ID'si ata
     session.permanent = True
     if 'current_chat_session' not in session:
         session['current_chat_session'] = str(uuid.uuid4())
@@ -308,24 +302,30 @@ def api_chat():
     user_id = session['user_id']
     user = get_db()["users"].get(user_id)
     
-    # AI yanıtını al ve hata durumunda uygun HTTP durum kodu döndür
     ai_response_data, raw_response = generate_ai_response(user_id, session_id, user_message, user["role"])
     ai_text = ai_response_data["text"]
     
-    # Hata döndürülmüşse (500 veya 503) istemciye bildir
     if "status" in ai_response_data:
         http_status = ai_response_data["status"]
         return jsonify({"success": False, "message": ai_text}), http_status
     
-    try:
-        db = get_db()
-        # İstemci mesajını kaydet
-        db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
-        # AI yanıtını kaydet
-        db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
-    except Exception as e:
-        print(f"!!! [API CHAT DB ERROR] Mesaj kaydı yapılamadı: {str(e)}", file=sys.stderr)
-
+    # KRİTİK: DB YAZMA İŞLEMİNİ 3 KEZ DENEYEN BLOK
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            db = get_db()
+            db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
+            db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
+            break  # Başarılı olursa döngüden çık
+        except sqlite_utils.db.OperationalError as e:
+            print(f"!!! [DB CHAT WRITE RETRY] DB yazma hatası. Yeniden deneme ({attempt + 1}/{max_retries}). Hata: {str(e)}", file=sys.stderr)
+            if attempt == max_retries - 1:
+                print("!!! [DB CHAT WRITE FAILED] Mesaj kaydı yapılamadı (Kalıcı DB kilitlenmesi).", file=sys.stderr)
+            time.sleep(1)
+        except Exception as e:
+            print(f"!!! [API CHAT DB ERROR] Mesaj kaydı yapılamadı (Genel hata): {str(e)}", file=sys.stderr)
+            break
+    
     return jsonify({"success": True, "response": ai_text})
 
 @app.route('/api/history', methods=['GET'])
@@ -333,11 +333,10 @@ def api_chat():
 def api_history():
     user_id = session['user_id']
     session_id = session.get('current_chat_session') 
-    # list() zorlaması ile veri tutarsızlığı engellenir
     history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
     return jsonify(history)
 
-# -- ANIME CHAT MODÜLÜ (Güvenlik ve stabilite aynı seviyede) ---------------------
+# -- ANIME CHAT MODÜLÜ ---------------------
 
 @app.route('/anime')
 @login_required
@@ -359,7 +358,6 @@ def api_anime_chat():
     user_id = session['user_id']
     user = get_db()["users"].get(user_id)
     
-    # Anime mesajı al ve hata durumunda uygun HTTP durum kodu döndür
     ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True)
     ai_text = ai_response_data["text"]
 
@@ -367,12 +365,22 @@ def api_anime_chat():
         http_status = ai_response_data["status"]
         return jsonify({"success": False, "message": ai_text}), http_status
 
-    try:
-        db = get_db()
-        db["anime_messages"].insert({"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
-        db["anime_messages"].insert({"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
-    except Exception as e:
-        print(f"!!! [API ANIME CHAT DB ERROR] Anime mesaj kaydı yapılamadı: {str(e)}", file=sys.stderr)
+    # KRİTİK: DB YAZMA İŞLEMİNİ 3 KEZ DENEYEN BLOK
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            db = get_db()
+            db["anime_messages"].insert({"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
+            db["anime_messages"].insert({"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
+            break 
+        except sqlite_utils.db.OperationalError as e:
+            print(f"!!! [DB ANIME WRITE RETRY] DB yazma hatası. Yeniden deneme ({attempt + 1}/{max_retries}). Hata: {str(e)}", file=sys.stderr)
+            if attempt == max_retries - 1:
+                print("!!! [DB ANIME WRITE FAILED] Anime mesaj kaydı yapılamadı (Kalıcı DB kilitlenmesi).", file=sys.stderr)
+            time.sleep(1)
+        except Exception as e:
+            print(f"!!! [API ANIME CHAT DB ERROR] Anime mesaj kaydı yapılamadı (Genel hata): {str(e)}", file=sys.stderr)
+            break
 
     return jsonify({"success": True, "response": ai_text})
 
@@ -466,9 +474,6 @@ def admin_manage_user(user_id):
 # ==============================================================================
 # 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
-# (V2.5'teki HTML/CSS/JS şablonları buraya kopyalanmıştır. Kodun tamamı için
-# bu bölümdeki değişkenler (BASE_CSS, BASE_JS, HTML_TEMPLATE, vb.)
-# V2.5'teki gibi olmalıdır.)
 BASE_CSS = """
 :root {
     --bg-dark: #121212;
@@ -527,13 +532,10 @@ function sendMessage(isAnime = false) {
         body: JSON.stringify({message: message})
     })
     .then(response => {
-        // HTTP durum kodunu kontrol et
         if (!response.ok) {
-            // Hata durumunda JSON'u okumaya çalış
             return response.json().then(errorData => {
-                throw new Error(errorData.message || 'Sunucudan başarısız yanıt alındı.');
+                throw new Error(errorData.message || 'Sunucudan başarısız yanıt alındı. HTTP Durum Kodu: ' + response.status);
             }).catch(e => {
-                // JSON okunamasa bile genel bir hata fırlat
                 throw new Error('Sunucudan HTTP ' + response.status + ' hatası döndü.');
             });
         }
@@ -543,14 +545,13 @@ function sendMessage(isAnime = false) {
         if (data.success) {
             appendMessage(data.response, 'ai');
         } else {
-            // Sunucu, başarılı sayılmayan (success: false) bir JSON döndürdüyse
-            appendMessage('Hata: ' + (data.message || 'Yapay Zeka Erişim Hatası oluştu.'), 'ai');
+            appendMessage('Hata: ' + (data.message || 'Yapay Zeka Erişim Hatası oluştu. Lütfen logları kontrol edin.'), 'ai');
         }
     })
     .catch(error => {
-        // Bağlantı kopması veya sunucu yanıtının tamamen geçersiz olduğu durumlar (İstemci Tarafı Hatası)
+        // İstemci Tarafı Hatası (Bağlantı kesintisi, CORS vb.)
         console.error('API İstemci Hatası:', error);
-        appendMessage('Bağlantı Hatası oluştu (İstemci Tarafı). Detay: ' + error.message, 'ai');
+        appendMessage('Bağlantı Hatası oluştu (İstemci Tarafı). Sunucu yanıt veremedi. Detay: ' + error.message, 'ai');
     });
 }
 
@@ -726,7 +727,7 @@ ADMIN_PANEL_TEMPLATE = """
         <a href="{{ url_for('index') }}" style="color:inherit; text-decoration:none;">⬅️ Sohbet'e Dön</a>
     </div>
     <div class="chat-container" style="padding: 20px;">
-        <h2>Kullanıcı Yönetimi (1. Madde)</h2>
+        <h2>Kullanıcı Yönetimi</h2>
         <table border="1" style="width:100%; border-collapse: collapse; text-align: left;">
             <thead>
                 <tr style="background:#333;"><th>ID</th><th>Kullanıcı Adı</th><th>Rol</th><th>Yasaklı mı?</th><th>İşlem</th></tr>
@@ -761,7 +762,7 @@ ADMIN_PANEL_TEMPLATE = """
             </tbody>
         </table>
         
-        <h2 style="margin-top:40px;">Admin Logları (7. Veri Kaydı)</h2>
+        <h2 style="margin-top:40px;">Admin Logları</h2>
         <pre>{{ logs }}</pre>
     </div>
 </body>
@@ -772,11 +773,7 @@ ADMIN_PANEL_TEMPLATE = """
 # 6. UYGULAMA BAŞLATMA
 # ==============================================================================
 
-# PRODUCTION (RENDER) ORTAMINDA app:app KOMUTU İLE GUNICORN ÇALIŞACAĞI İÇİN
-# app.run() bloğunu tamamen kaldırıyoruz. Bu, sunucu stabilitesini artırır.
 if __name__ == '__main__':
-    # Bu blok sadece yerel geliştirme için korundu.
-    # Render'da çalışmayacaktır.
     try:
         app.run(debug=True)
     except Exception as e:
