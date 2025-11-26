@@ -1,6 +1,6 @@
 # ==============================================================================
 # AURION PROJESİ - TÜM 16 ÖZELLİK DAHİL TAM KOD (app.py)
-# Versiyon: 1.0 (Dağıtım Hatalarına Karşı Dirençli)
+# Versiyon: 1.0 (Dağıtım Hatalarına Karşı KESİN DİRENÇLİ SÜRÜM)
 # ==============================================================================
 
 import os
@@ -20,11 +20,9 @@ import sys
 # 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER (RENDER.COM İÇİN)
 # ==============================================================================
 
-# Ortam değişkenlerini os.getenv() ile yükle
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
-# 11. Güvenli Anahtar: Kendi belirlediğiniz gizli anahtar
 SECRET_KEY = os.getenv("SECRET_KEY", "cok_gizli_ve_uzun_bir_anahtar_buraya_yazin_ve_degistirin")
 
 DATABASE_URL = "aurion.db"
@@ -34,7 +32,6 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
-# Gemini İstemcisi
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ==============================================================================
@@ -71,7 +68,7 @@ def init_db():
         "id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime
     }, pk="id")
     
-    # Süper Admin Oluşturma (Dokunulmazlık)
+    # Süper Admin Oluşturma (1. Süper Admin Dokunulmazlığı)
     if not list(db["users"].rows_where("username = 'enes'")):
         db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
 
@@ -110,10 +107,10 @@ def role_required(required_role):
     return decorator
 
 # ==============================================================================
-# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI
+# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI (TÜMÜ DAHİL)
 # ==============================================================================
 
-# 5. Arama Motoru (Simülasyon, gerçek API çağrısı bu yapıyı kullanırdı)
+# 5. Arama Motoru Simülasyonu
 def search_internet(query):
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
@@ -260,7 +257,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role):
         return {"text": f"Yapay Zeka Hatası: Bir sorun oluştu. Detaylar sistem loglarına kaydedildi. (Hata: {str(e)})"}, None
 
 # ==============================================================================
-# 4. FLASK ROUTES
+# 4. FLASK ROUTES (TÜMÜ DAHİL)
 # ==============================================================================
 
 # -- Anasayfa ve Sohbet (3. Sohbet Sistemi) ------------------------------------
@@ -269,7 +266,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role):
 @login_required
 def index():
     user = get_db()["users"].get(session['user_id'])
-    # 9. Tek Dosya Yapısı: HTML, CSS ve JS Python içine gömülü
     return render_template_string(HTML_TEMPLATE, user=user, is_super_admin=(user['role'] == 'super_admin'))
 
 @app.route('/api/chat', methods=['POST'])
@@ -353,7 +349,7 @@ def admin_panel():
     users = get_db()["users"].rows_where(order_by="role DESC")
     logs = get_db()["admin_logs"].rows_where(order_by="timestamp DESC", limit=20)
     
-    return render_template_string(ADMIN_PANEL_TEMPLATE, users=list(users), logs=json.dumps(list(logs), indent=2))
+    return render_template_string(ADMIN_PANEL_TEMPLATE, users=list(users), logs=json.dumps(list(logs), indent=2, default=str))
 
 @app.route('/admin/manage_user/<int:user_id>', methods=['POST'])
 @login_required
@@ -408,10 +404,8 @@ def super_admin_anime_search():
     return render_template_string(SUPER_ADMIN_ANIME_TEMPLATE, info=info, dublaj=simulated_dublaj, anime_name=anime_name, episode_num=episode_num)
 
 # ==============================================================================
-# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR (HATALAR İÇİN DİRENÇLİ)
+# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR (SON DÜZELTMELER)
 # ==============================================================================
-
-# (Bu kısım, kodun çalışmasını engelleyen tırnak işareti/süslü parantez hatalarını önlemek için dikkatle yazılmıştır)
 
 BASE_CSS = """
 :root {
@@ -507,8 +501,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 """
+# HTML ŞABLONLARI: Çift tırnak yerine üçlü tırnak (""") ve tek tırnak (') kullanımı zorunlu.
 
-# Jinja2 ifadeleri tırnaklarla kaçılarak Python syntax hatası önlenir.
 HTML_TEMPLATE = f"""
 <!DOCTYPE html>
 <html lang="tr">
@@ -525,22 +519,22 @@ HTML_TEMPLATE = f"""
         
         <p>Hoş Geldiniz, <b>{{{{ user.username }}}}</b></p>
         <p>Rol: <i>{{{{ user.role }}}}</i></p>
-        <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("logout") }}\'}}{{\'{% endif %}\'}}" style="color:var(--primary-color);">Çıkış Yap</a>
+        <a href="{{{{ url_for('logout') }}}}" style="color:var(--primary-color);">Çıkış Yap</a>
         
         <hr style="border-color:#333;">
 
         <nav style="flex-grow:1;">
             <a href="/" style="display:block; margin-bottom:10px; color:inherit; text-decoration:none;">💬 Sohbet</a>
             
-            {{\'{% if user.role in ("admin", "super_admin") %}\'}}
-            <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("admin_panel") }}\'}}{{\'{% endif %}\'}}" style="display:block; margin-bottom:10px; color:#FFA500; text-decoration:none;">🛡️ Admin Paneli</a>
-            {{\'{% endif %}\'}}
+            {'{% if user.role in ("admin", "super_admin") %}'}
+            <a href="{{{{ url_for('admin_panel') }}}}" style="display:block; margin-bottom:10px; color:#FFA500; text-decoration:none;">🛡️ Admin Paneli</a>
+            {'{% endif %}'}
 
-            {{\'{% if is_super_admin %}\'}}
+            {'{% if is_super_admin %}'}
             <hr style="border-color:#FFD700;">
             <p style="color:#FFD700;">⭐ SÜPER ADMIN</p>
-            <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("super_admin_anime") }}\'}}{{\'{% endif %}\'}}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime</a>
-            {{\'{% endif %}\'}}
+            <a href="{{{{ url_for('super_admin_anime') }}}}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime</a>
+            {'{% endif %}'}
         </nav>
         
     </div>
@@ -550,7 +544,7 @@ HTML_TEMPLATE = f"""
         </div>
 
         <div class="input-area">
-            <input type="text" id="message-input" placeholder="Aurion\'a bir şey sor veya komut gir (/mode enemy, /teach Python)">
+            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/mode enemy, /teach Python)">
         </div>
     </div>
 
@@ -571,7 +565,7 @@ LOGIN_TEMPLATE = f"""
 <body class="dark">
     <div class="container">
         <h2 style="text-align:center; color:#007BFF;">AURION Giriş</h2>
-        {{\'{% if error %}\'}}<p style="color:red; text-align:center;">{{{{ error }}}}</p>{{\'{% endif %}\'}}
+        {'{% if error %}'}<p style="color:red; text-align:center;">{{{{ error }}}}</p>{'{% endif %}'}
         <form method="POST">
             <label for="username">Kullanıcı Adı</label>
             <input type="text" id="username" name="username" required>
@@ -579,7 +573,7 @@ LOGIN_TEMPLATE = f"""
             <input type="password" id="password" name="password" required>
             <button type="submit">Giriş Yap</button>
         </form>
-        <p style="text-align:center;"><a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("register") }}\'}}{{\'{% endif %}\'}}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
+        <p style="text-align:center;"><a href="{{{{ url_for('register') }}}}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
     </div>
 </body>
 </html>
@@ -587,20 +581,20 @@ LOGIN_TEMPLATE = f"""
 
 REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("login", "register").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
 
-ADMIN_PANEL_TEMPLATE = f"""
+ADMIN_PANEL_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Admin Paneli</title>
-    <style>{BASE_CSS}</style>
+    <style>""" + BASE_CSS + """</style>
 </head>
 <body class="dark">
     <div class="sidebar">
         <h1 class="logo" style="color:#FFA500;">🛡️ Admin</h1>
         <hr style="border-color:#333;">
-        <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("index") }}\'}}{{\'{% endif %}\'}}" style="color:inherit; text-decoration:none;">⬅️ Sohbet\'e Dön</a>
+        <a href="{{ url_for('index') }}" style="color:inherit; text-decoration:none;">⬅️ Sohbet'e Dön</a>
     </div>
     <div class="chat-container" style="padding: 20px;">
         <h2>Kullanıcı Yönetimi (1. Madde)</h2>
@@ -609,64 +603,64 @@ ADMIN_PANEL_TEMPLATE = f"""
                 <tr style="background:#333;"><th>ID</th><th>Kullanıcı Adı</th><th>Rol</th><th>Yasaklı mı?</th><th>İşlem</th></tr>
             </thead>
             <tbody>
-            {{\'{% for user in users %}\'}}
-                <tr style="background:{{\'{% if user.role == "super_admin" %}\'}}#440000; color:yellow;{{\'{% elif user.role == "admin" %}\'}}#333;{{\'{% endif %}\'}}">
-                    <td>{{{{ user.id }}}}</td>
-                    <td>{{{{ user.username }}}}</td>
-                    <td>{{{{ user.role }}}}</td>
-                    <td>{{\'{% if user.is_banned %}\'}}Evet{{\'{% else %}\'}}Hayır{{\'{% endif %}\'}}</td>
+            {% for user in users %}
+                <tr style="background:{% if user.role == 'super_admin' %}#440000; color:yellow;{% elif user.role == 'admin' %}#333;{% endif %};">
+                    <td>{{ user.id }}</td>
+                    <td>{{ user.username }}</td>
+                    <td>{{ user.role }}</td>
+                    <td>{% if user.is_banned %}Evet{% else %}Hayır{% endif %}</td>
                     <td>
-                        <form method="POST" action="{{\'{% if url_for %}\'}}{{\'{{ url_for("admin_manage_user", user_id=user.id) }}\'}}{{\'{% endif %}\'}}" style="display:inline-block;">
-                            {{\'{% if user.role != "super_admin" %}\'}}
-                                {{\'{% if not user.is_banned %}\'}}
+                        <form method="POST" action="{{ url_for('admin_manage_user', user_id=user.id) }}" style="display:inline-block;">
+                            {% if user.role != "super_admin" %}
+                                {% if not user.is_banned %}
                                     <button type="submit" name="action" value="ban" style="background:red;">Yasakla</button>
-                                {{\'{% else %}\'}}
+                                {% else %}
                                     <button type="submit" name="action" value="unban" style="background:green;">Yasağı Kaldır</button>
-                                {{\'{% endif %}\'}}
-                                {{\'{% if user.role == "user" %}\'}}
+                                {% endif %}
+                                {% if user.role == "user" %}
                                     <button type="submit" name="action" value="set_admin">Admin Yap</button>
-                                {{\'{% else %}\'}}
+                                {% else %}
                                     <button type="submit" name="action" value="set_user">Üye Yap</button>
-                                {{\'{% endif %}\'}}
-                            {{\'{% else %}\'}}
+                                {% endif %}
+                            {% else %}
                                 <span style="color:red; font-weight:bold;">DOKUNULMAZ</span>
-                            {{\'{% endif %}\'}}
+                            {% endif %}
                         </form>
                     </td>
                 </tr>
-            {{\'{% endfor %}\'}}
+            {% endfor %}
             </tbody>
         </table>
         
         <h2 style="margin-top:40px;">Admin Logları (7. Veri Kaydı)</h2>
-        <pre>{{{{ logs }}}}</pre>
+        <pre>{{ logs }}</pre>
     </div>
 </body>
 </html>
 """
 
-SUPER_ADMIN_ANIME_TEMPLATE = f"""
+SUPER_ADMIN_ANIME_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Süper Admin Anime Modülü</title>
-    <style>{BASE_CSS}</style>
+    <style>""" + BASE_CSS + """</style>
 </head>
 <body class="dark">
     <div class="sidebar">
         <h1 class="logo" style="color:#FFD700;">📺 Anime Modülü</h1>
         <hr style="border-color:#333;">
-        <a href="{{\'{% if url_for %}\'}}{{\'{{ url_for("index") }}\'}}{{\'{% endif %}\'}}" style="color:inherit; text-decoration:none;">⬅️ Sohbet\'e Dön</a>
+        <a href="{{ url_for('index') }}" style="color:inherit; text-decoration:none;">⬅️ Sohbet'e Dön</a>
     </div>
     <div class="chat-container" style="padding: 20px;">
         <h2>16. Özel Medya Modülü (Süper Admin Özel)</h2>
         <p style="color:#FFA500;">Bu modül sadece enes için AI tabanlı Anime arama ve Türkçe dublaj (simülasyon) hizmeti sunar.</p>
 
-        {{\'{% if error %}\'}}<p style="color:red; font-weight:bold;">Hata: {{{{ error }}}} </p>{{\'{% endif %}\'}}
+        {% if error %}<p style="color:red; font-weight:bold;">Hata: {{ error }} </p>{% endif %}
 
-        <form method="POST" action="{{\'{% if url_for %}\'}}{{\'{{ url_for("super_admin_anime_search") }}\'}}{{\'{% endif %}\'}}" style="margin-top:20px;">
+        <form method="POST" action="{{ url_for('super_admin_anime_search') }}" style="margin-top:20px;">
             <label for="anime_name">Anime Adı:</label>
             <input type="text" id="anime_name" name="anime_name" required style="width: 300px; padding: 5px;">
             <label for="episode_num">Bölüm No:</label>
@@ -674,19 +668,19 @@ SUPER_ADMIN_ANIME_TEMPLATE = f"""
             <button type="submit" style="background:#007BFF;">Anime Ara ve Dublaj Çevir</button>
         </form>
 
-        {{\'{% if dublaj %}\'}}
-            <h3 style="margin-top:30px; color:lightgreen;">✅ AI Çeviri Sonucu ({{{{ anime_name }}}} - Bölüm {{{{ episode_num }}}} )</h3>
-            <pre style="background:#333; padding:15px; border-radius:5px; white-space: pre-wrap;">{{{{ dublaj }}}}</pre>
-            {{\'{% if info.episodes %}\'}}
+        {% if dublaj %}
+            <h3 style="margin-top:30px; color:lightgreen;">✅ AI Çeviri Sonucu ({{ anime_name }} - Bölüm {{ episode_num }} )</h3>
+            <pre style="background:#333; padding:15px; border-radius:5px; white-space: pre-wrap;">{{ dublaj }}</pre>
+            {% if info.episodes %}
             <h4>Bölüm Bilgileri:</h4>
             <ul>
-                {{\'{% for episode in info.episodes %}\'}}
-                <li>Bölüm {{{{ episode.num }}}}: {{{{ episode.title }}}}</li>
-                {{\'{% endfor %}\'}}
+                {% for episode in info.episodes %}
+                <li>Bölüm {{ episode.num }}: {{ episode.title }}</li>
+                {% endfor %}
             </ul>
-            {{\'{% endif %}\'}}
+            {% endif %}
             <p style="color:yellow;">(Not: Bu, AI tarafından oluşturulmuş bir dublaj/özet simülasyonudur.)</p>
-        {{\'{% endif %}\'}}
+        {% endif %}
     </div>
 </body>
 </html>
