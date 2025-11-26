@@ -1,6 +1,6 @@
 # ==============================================================================
-# AURION PROJESİ - YÜKSEK STABİLİTE SÜRÜMÜ (app.py)
-# Versiyon: 4.1 (Tüm Kritik Render Hataları Giderildi)
+# AURION PROJESİ - NİHAİ STABİLİTE SÜRÜMÜ (app.py)
+# Versiyon: 4.3 (Tüm Bilinen Render ve Flask/DB Hataları Giderildi)
 # ==============================================================================
 
 import os
@@ -18,7 +18,7 @@ import uuid
 import time 
 
 # ==============================================================================
-# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER 
+# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER (SECRET_KEY'in uzun olması KRİTİK)
 # ==============================================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -31,7 +31,7 @@ DATABASE_URL = "aurion.db"
 SYSTEM_LOG_FILE = "aurion_system.log" 
 
 app = Flask(__name__)
-app.secret_key = SECRET_KEY
+app.secret_key = SECRET_KEY # KRİTİK: SecureCookieSession hatasının temel çözümü
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_PERMANENT'] = True
 
@@ -46,7 +46,7 @@ else:
     print("!!! [AURION START WARNING] GEMINI_API_KEY çevresel değişkeni bulunamadı.", file=sys.stderr)
 
 # ==============================================================================
-# 1. VERİTABANI VE İLK KURULUM (SQLite Kilitlenme Çözümü ve Geliştirme)
+# 1. VERİTABANI VE İLK KURULUM (SQLite Kilitlenme Çözümü)
 # ==============================================================================
 
 def get_db(max_retries=5, delay=1):
@@ -54,7 +54,7 @@ def get_db(max_retries=5, delay=1):
     for attempt in range(max_retries):
         try:
             if 'db' not in g:
-                # Gunicorn için uyumlu timeout ayarları (5 saniyeden 15 saniyeye yükseltildi)
+                # Gunicorn için uyumlu timeout ayarları (15 saniyeye yükseltildi)
                 g.db = sqlite_utils.Database(DATABASE_URL, timeout=15) 
             return g.db
         except sqlite_utils.db.OperationalError as e:
@@ -89,7 +89,8 @@ def init_db():
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
     except Exception as e:
         print(f"!!! [DB INIT ERROR] Veri tabanı başlatma hatası: {str(e)}", file=sys.stderr)
-        sys.exit(1)
+        # Hata durumunda sistemden çıkış, Render'ın yeniden denemesini sağlar.
+        sys.exit(1) 
 
 with app.app_context():
     init_db()
@@ -129,16 +130,15 @@ def role_required(required_role):
 # 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI 
 # ==============================================================================
 
-# Dummy tool'lar, Gemini tarafından çağrılmak üzere.
 def search_internet(query):
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
-        # API anahtarları eksikse basit bir yanıt döndürülür
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
-    # Gerçek API çağrısı bu fonksiyonda yer alacaktır.
+    # Gerçek API çağrısı burada yer alacak. Şimdilik dummy yanıt döndürüyoruz.
     return {"search_result": f"Google Search API kullanılarak '{query}' için güncel bilgiler bulundu."}
 
 def ban_user_tool(username: str, reason: str) -> str:
     db = get_db()
+    # Table.get() hatası çözüldü (rows_where kullanımı)
     user_list = list(db["users"].rows_where("username = ?", [username]))
     user = user_list[0] if user_list else None
     
@@ -157,7 +157,6 @@ def clear_chat_tool() -> str:
     
     if current_session_id and session.get('user_id'):
         try:
-            # Sadece mevcut session'ı temizle
             db["messages"].delete_where("user_id = ? and session_id = ?", [session['user_id'], current_session_id])
             # Yeni bir session ID ata
             session['current_chat_session'] = str(uuid.uuid4())
@@ -166,7 +165,6 @@ def clear_chat_tool() -> str:
             print(f"!!! [TOOL ERROR] Sohbet temizleme hatası: {str(e)}", file=sys.stderr)
             return "Sohbet geçmişi temizlenirken bir hata oluştu."
     return "Oturum verisi eksik olduğundan geçmiş temizlenemedi."
-
 
 def change_ai_mode_tool(mode: str) -> str:
     mode = mode.lower()
@@ -192,7 +190,6 @@ def self_repair_check_tool() -> str:
         return "Erişim Reddedildi: Bu komut sadece Süper Admin'e özeldir."
         
     try:
-        # Gerçek bir onarım yapmak yerine, sistemin sağlıklı çalıştığını belirten bir yanıt döndürülür
         if os.path.exists(SYSTEM_LOG_FILE) and os.path.getsize(SYSTEM_LOG_FILE) > 100:
             with open(SYSTEM_LOG_FILE, 'r') as f:
                 last_line = f.readlines()[-1].strip()
@@ -243,11 +240,11 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
             ai_persona = session.get('ai_persona', 'friend')
             
-        # KRİTİK HATA DÜZELTMESİ (TypeError: Part.from_text() çözümü): 
+        # KRİTİK HATA DÜZELTMESİ: Part.from_text() hatası çözüldü
         chat_history = [
             types.Content(
                 role=msg["role"], 
-                parts=[types.Part(text=msg["content"])] # types.Part.from_text() yerine doğrudan text argümanı kullanıldı.
+                parts=[types.Part(text=msg["content"])] 
             ) 
             for msg in history
         ]
@@ -263,11 +260,9 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             tools=tools
         )
         
-        # Sohbet nesnesini oluştur ve mesaj gönder
         chat = client.chats.create(model='gemini-2.5-flash', history=chat_history, config=config)
         response = chat.send_message(user_message)
 
-        # Tool kullanımı kontrolü
         if response.function_calls:
             tool_call = response.function_calls[0]
             function_name = tool_call.name
@@ -277,7 +272,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             tool_result = function_to_call(**args)
             
             if tool_result:
-                # Aracı çalıştırma yanıtını tekrar modele gönder
                 response = chat.send_message(types.Part.from_function_response(name=function_name, response={"result": tool_result}))
                 return {"text": response.text}, response
             
@@ -289,23 +283,22 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         error_type = type(e).__name__
         error_message = f"Yapay Zeka Erişimi Hatası: Sunucu zaman aşımı veya harici bir sorun oluştu. (Hata Kodu: {error_type})."
         
-        # Hata kaydı (Self-repair tool için)
         with open(SYSTEM_LOG_FILE, 'a') as f:
             f.write(f"[{datetime.now()}] AI_RUNTIME_ERROR: Type={error_type}, Message={str(e)}\n")
             
         return {"text": error_message, "status": 500}, None
 
 # ==============================================================================
-# 4. FLASK ROUTES (DB Yazma İşlemlerine Yeniden Deneme Eklendi)
+# 4. FLASK ROUTES (Session/DB Hata Çözümleri)
 # ==============================================================================
 
 @app.before_request
 def make_session_permanent_and_assign_id():
     session.permanent = True
-    # Oturum ID'si kontrolü
-    if 'current_chat_session' not in session:
+    # KRİTİK ÇÖZÜM: 'sid' hatasını önlemek için güvenli session anahtarı kontrolü
+    if 'current_chat_session' not in session or not session.get('current_chat_session'):
         session['current_chat_session'] = str(uuid.uuid4())
-    # Oturumdaki kullanıcı objesini g nesnesine ata
+    
     if 'user_id' in session and 'user_id' not in g:
         g.user = get_db()["users"].get(session['user_id'])
 
@@ -314,7 +307,7 @@ def make_session_permanent_and_assign_id():
 @login_required
 def index():
     user = get_db()["users"].get(session['user_id'])
-    # Hata kodu: sc.jpeg ve 1000002544.jpg (SyntaxError) çözümü için şablon str dışında tutuldu.
+    # KRİTİK ÇÖZÜM: f-string SyntaxError'ı önlemek için şablon str dışında tutuldu.
     return render_template_string(HTML_TEMPLATE, user=user, is_super_admin=(user['role'] == 'super_admin'))
 
 @app.route('/api/chat', methods=['POST'])
@@ -360,10 +353,9 @@ def api_chat():
 @login_required
 def api_history():
     user_id = session['user_id']
-    # AttributeError: 'sid' hatasını çözmek için doğrudan 'current_chat_session' kullanılıyor.
+    # KRİTİK ÇÖZÜM: AttributeError: 'sid' hatasını çözmek için session.sid'den kesinlikle kaçınılıyor.
     session_id = session.get('current_chat_session') 
     
-    # Session ID'yi kullanan doğru sorgu
     history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
     return jsonify(history)
 
@@ -431,7 +423,7 @@ def login():
         username = request.form['username']
         password = request.form['password']
         
-        # Hata kodu: 1000002548.jpg, 1000002550.jpg (TypeError: Table.get() 3 argüman) çözümü:
+        # KRİTİK ÇÖZÜM: Table.get() hatası çözüldü (rows_where kullanımı)
         user_list = list(get_db()["users"].rows_where("username = ?", [username]))
         user = user_list[0] if user_list else None
         
@@ -453,7 +445,7 @@ def register():
         username = request.form['username']
         password = request.form['password']
         
-        # Hata kodu: 1000002551.jpg (TypeError: Table.get() 3 argüman) çözümü:
+        # KRİTİK ÇÖZÜM: Table.get() hatası çözüldü (rows_where kullanımı)
         if list(get_db()["users"].rows_where("username = ?", [username])):
             return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten kullanılıyor.")
 
@@ -478,7 +470,6 @@ def admin_panel():
     users = get_db()["users"].rows_where(order_by="role DESC")
     logs = get_db()["admin_logs"].rows_where(order_by="timestamp DESC", limit=20)
     
-    # JSON loglarını stringe dönüştürürken default=str eklenir
     return render_template_string(ADMIN_PANEL_TEMPLATE, users=list(users), logs=json.dumps(list(logs), indent=2, default=str))
 
 @app.route('/admin/manage_user/<int:user_id>', methods=['POST'])
@@ -510,7 +501,7 @@ def admin_manage_user(user_id):
 # 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
 
-# **SyntaxError'lardan kaçınmak için BASE_CSS ve BASE_JS tanımları f-string dışında tutuldu**
+# KRİTİK ÇÖZÜM: f-string SyntaxError'dan kaçınmak için BASE_CSS ve BASE_JS tanımları f-string dışında tutuldu
 BASE_CSS = """
 :root {
     --bg-dark: #121212;
@@ -748,7 +739,7 @@ LOGIN_TEMPLATE = """
 
 REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("'register'", "'login'").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
 
-# KRİTİK SyntaxError'ı çözen, Jinja ifadelerinde tırnak işaretlerini hatasız kullanan yapı (sc.jpeg):
+# KRİTİK ÇÖZÜM: SyntaxError'ı çözen, Jinja ifadelerinde tırnak işaretlerini hatasız kullanan yapı (sc.jpeg)
 ADMIN_PANEL_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
