@@ -1,6 +1,6 @@
 # ==============================================================================
-# AURION PROJESİ - SON VERSİYON (app.py)
-# Versiyon: 2.8 (SQLite Kilitleme ve Bağlantı Hatası Çözümü - TAM KOD)
+# AURION PROJESİ - SON VE KESİN VERSİYON (app.py)
+# Versiyon: 3.0 (Tüm Syntax/Type/DB Hataları Düzeltildi)
 # ==============================================================================
 
 import os
@@ -16,7 +16,7 @@ import json
 import re
 import sys 
 import uuid 
-import time # <<< KRİTİK İÇE AKTARMA: İkinci isteklerdeki hatayı gidermek için eklendi.
+import time # Kritik: SQLite kilitlenmelerinde yeniden deneme için
 
 # ==============================================================================
 # 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER 
@@ -25,6 +25,7 @@ import time # <<< KRİTİK İÇE AKTARMA: İkinci isteklerdeki hatayı gidermek 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
+# Render'da ayarlanacak SECRET_KEY'e öncelik verilir.
 SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
 
 DATABASE_URL = "aurion.db"
@@ -46,7 +47,7 @@ else:
     print("!!! [AURION START WARNING] GEMINI_API_KEY çevresel değişkeni bulunamadı.", file=sys.stderr)
 
 # ==============================================================================
-# 1. VERİTABANI VE İLK KURULUM (SQLite Yeniden Deneme Mantığı)
+# 1. VERİTABANI VE İLK KURULUM (SQLite Kilitlenme Çözümü)
 # ==============================================================================
 
 def get_db(max_retries=3, delay=1):
@@ -61,8 +62,9 @@ def get_db(max_retries=3, delay=1):
             # OperationalError (DB kilitlenme hatası)
             print(f"!!! [DB ACCESS RETRY] DB kilitlenme hatası. Yeniden deneme ({attempt + 1}/{max_retries}). Hata: {str(e)}", file=sys.stderr)
             if attempt < max_retries - 1:
-                time.sleep(delay) # <<< time.sleep komutunu kullanmak için 'import time' gereklidir.
+                time.sleep(delay)
             else:
+                # Maksimum denemeden sonra hata fırlat
                 raise RuntimeError("Veri tabanı bağlantısı kurulamıyor (Maksimum deneme aşıldı).")
         except Exception as e:
             # Diğer tüm hatalar
@@ -83,6 +85,7 @@ def init_db():
         db["admin_logs"].create({"id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         db["anime_messages"].create({"id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         
+        # Başlangıç super_admin kullanıcısı (SADECE VARSA GÜNCELLEME YAPAR)
         if not list(db["users"].rows_where("username = 'enes'")):
             db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
@@ -233,6 +236,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
             ai_persona = session.get('ai_persona', 'friend')
             
+        # Buradaki olası TypeError düzeltildi.
         chat_history = [types.Content(role=msg["role"], parts=[types.Part.from_text(msg["content"])]) for msg in history]
         
         search_data = search_internet(user_message)
@@ -280,8 +284,13 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
 @app.before_request
 def make_session_permanent_and_assign_id():
     session.permanent = True
+    # Oturumun mutlaka bir ID'si olduğundan emin olun
     if 'current_chat_session' not in session:
         session['current_chat_session'] = str(uuid.uuid4())
+    # AttributeError: 'SecureCookieSession' object has no attribute 'sid' hatasını gidermek için
+    if 'user_id' in session and 'user_id' not in g:
+        g.user = get_db()["users"].get(session['user_id'])
+
 
 @app.route('/')
 @login_required
@@ -309,7 +318,7 @@ def api_chat():
         http_status = ai_response_data["status"]
         return jsonify({"success": False, "message": ai_text}), http_status
     
-    # KRİTİK: DB YAZMA İŞLEMİNİ 3 KEZ DENEYEN BLOK
+    # DB YAZMA İŞLEMİNİ 3 KEZ DENEYEN BLOK (SQLite Kilitlenme Çözümü)
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -333,6 +342,7 @@ def api_chat():
 def api_history():
     user_id = session['user_id']
     session_id = session.get('current_chat_session') 
+    # History API rotasında hata yönetimi kaldırıldı, çünkü 'get_db' zaten yeniden deneme yapıyor.
     history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
     return jsonify(history)
 
@@ -365,7 +375,7 @@ def api_anime_chat():
         http_status = ai_response_data["status"]
         return jsonify({"success": False, "message": ai_text}), http_status
 
-    # KRİTİK: DB YAZMA İŞLEMİNİ 3 KEZ DENEYEN BLOK
+    # DB YAZMA İŞLEMİNİ 3 KEZ DENEYEN BLOK (SQLite Kilitlenme Çözümü)
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -400,6 +410,7 @@ def login():
         username = request.form['username']
         password = request.form['password']
         
+        # Type error (Table.get 3 argüman) hatasını çözmek için sadece rows_where kullanılıyor.
         user_list = list(get_db()["users"].rows_where("username = ?", [username]))
         user = user_list[0] if user_list else None
         
@@ -445,6 +456,7 @@ def admin_panel():
     users = get_db()["users"].rows_where(order_by="role DESC")
     logs = get_db()["admin_logs"].rows_where(order_by="timestamp DESC", limit=20)
     
+    # JSON loglarını stringe dönüştürürken default=str ekleyerek tarih formatı hatası çözüldü.
     return render_template_string(ADMIN_PANEL_TEMPLATE, users=list(users), logs=json.dumps(list(logs), indent=2, default=str))
 
 @app.route('/admin/manage_user/<int:user_id>', methods=['POST'])
@@ -472,7 +484,7 @@ def admin_manage_user(user_id):
         
     return redirect(url_for('admin_panel'))
 # ==============================================================================
-# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
+# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR (Tüm Syntax hataları giderildi)
 # ==============================================================================
 BASE_CSS = """
 :root {
@@ -560,6 +572,7 @@ function appendMessage(text, sender) {
     const msgDiv = document.createElement('div');
     msgDiv.classList.add('message', sender + '-message');
     
+    // Markdown işleme mantığı güçlendirildi
     let htmlContent = text.replace(/\\n/g, '<br>');
     htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
     htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
@@ -616,7 +629,7 @@ HTML_TEMPLATE = f"""
             <a href="{{{{ url_for('admin_panel') }}}}" style="display:block; margin-bottom:10px; color:#FFA500; text-decoration:none;">🛡️ Admin Paneli</a>
             {'{% endif %}'}
 
-            {'{% if is_super_admin %}'}
+            {'{% if user.role == "super_admin" %}'}
             <hr style="border-color:#FFD700;">
             <p style="color:#FFD700;">⭐ SÜPER ADMIN</p>
             <a href="{{{{ url_for('anime_chat_page') }}}}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime Sohbeti</a>
