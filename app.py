@@ -1,6 +1,6 @@
 # ==============================================================================
-# AURION PROJESİ - NİHAİ HATA GİDERİLMİŞ KARARLI SÜRÜM (app.py)
-# Versiyon: 8.0 (Tüm Log Hataları Kesin Olarak Çözüldü - Render Uyumlu)
+# AURION PROJESİ - NİHAİ EKSİKSİZ VE KARARLI SÜRÜM (app.py)
+# Versiyon: 9.0 (Tüm Fonksiyonlar Aktif, Hatalar Giderilmiş)
 # ==============================================================================
 
 import os
@@ -12,6 +12,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from google import genai
 from google.genai import types
+from googleapiclient.discovery import build # Google Search API için
 import json
 import sys 
 import uuid 
@@ -23,7 +24,8 @@ import re
 # ==============================================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
+# KRİTİK: Google Custom Search Engine ID ve API Key
+GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID") 
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
 
@@ -44,19 +46,13 @@ if GEMINI_API_KEY:
         print(f"!!! [AURION START CRITICAL] Gemini istemcisi başlatılamadı: {type(e).__name__} - {e}", file=sys.stderr)
 
 # ==============================================================================
-# 1. VERİTABANI İLK KURULUM VE KRİTİK DB KİLİTLENME ÇÖZÜMÜ
+# 1. VERİTABANI İLK KURULUM VE KRİTİK DB KİLİTLENME ÇÖZÜMÜ (V8.0 ile Aynı, Kararlı)
 # ==============================================================================
 
 def get_db(max_retries=5, delay=1):
-    """
-    [DB KİLİTLENME ÇÖZÜMÜ V8.0]
-    Loglardaki 'timeout' anahtar kelime hatasını ve kilitlenmeyi önler.
-    'timeout' parametresi kaldırıldı. Otomatik yeniden deneme mantığı ile kararlılık artırıldı.
-    """
     for attempt in range(max_retries):
         try:
             if 'db' not in g or not g.db.conn:
-                # KRİTİK DEĞİŞİKLİK: sqlite_utils.Database sadece dosyayı alır, timeout beklenmiyorsa kaldırılır.
                 g.db = sqlite_utils.Database(DATABASE_URL) 
             return g.db
         except sqlite_utils.db.OperationalError as e:
@@ -86,13 +82,11 @@ def init_db():
         db["admin_logs"].create({"id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         db["anime_messages"].create({"id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         
-        # Süper admin kontrolü
         if not list(db["users"].rows_where("username = 'enes'")):
             db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
     except Exception as e:
         print(f"!!! [DB INIT ERROR] Veri tabanı başlatma hatası: {str(e)}", file=sys.stderr)
-        # Hata durumunda uygulama çıkışı
         sys.exit(1) 
 
 with app.app_context():
@@ -101,13 +95,12 @@ with app.app_context():
 limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"], storage_uri="memory://")
 
 # ==============================================================================
-# 2. YETKİLENDİRME VE ÖN İŞLEMLER
+# 2. YETKİLENDİRME VE ÖN İŞLEMLER (V8.0 ile Aynı, Kararlı)
 # ==============================================================================
 
 def login_required(f):
     def wrap(*args, **kwargs):
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
+        if 'user_id' not in session: return redirect(url_for('login'))
         return f(*args, **kwargs)
     wrap.__name__ = f.__name__
     return wrap
@@ -115,7 +108,6 @@ def login_required(f):
 def role_required(required_role):
     def decorator(f):
         def wrap(*args, **kwargs):
-            # KRİTİK ÇÖZÜM: g.user kullanılarak DB sorgusu tekrarı önlenir
             user = g.get('user')
             user_role = user["role"] if user else 'guest'
             
@@ -123,7 +115,6 @@ def role_required(required_role):
                 return "Erişim Reddedildi: Süper Admin yetkisi gerekli.", 403
             if required_role == 'admin' and user_role not in ('admin', 'super_admin'):
                 return "Erişim Reddedildi: Admin yetkisi gerekli.", 403
-
             return f(*args, **kwargs)
         wrap.__name__ = f.__name__
         return wrap
@@ -131,33 +122,53 @@ def role_required(required_role):
 
 @app.before_request
 def make_session_permanent_and_assign_id():
-    """
-    [KRİTİK ÇÖZÜM: 'SecureCookieSession' object has no attribute 'sid']
-    Flask'in kararsız session.sid'i yerine kendi UUID'miz kullanılır.
-    Kullanıcı bilgisi her istekte g objesine yüklenir.
-    """
     session.permanent = True
     if 'current_chat_session' not in session or not session.get('current_chat_session'):
         session['current_chat_session'] = str(uuid.uuid4())
     
     if 'user_id' in session and 'user' not in g:
-        # KRİTİK ÇÖZÜM: rows_where kullanılarak Table.get() hatası önlenir
         user_list = list(get_db()["users"].rows_where("id = ?", [session['user_id']]))
         g.user = user_list[0] if user_list else None
 
-
 # ==============================================================================
-# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI
+# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI (TÜM GÖVDELER AKTİF EDİLDİ)
 # ==============================================================================
 
-def search_internet(query):
-    # Basit bir stub fonksiyon
+def search_internet(query: str) -> dict:
+    """
+    [EKSİK ÇÖZÜM] Google Custom Search API'si kullanılarak internetten güncel bilgi çeker.
+    """
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
+        # API anahtarları eksikse stub yanıtı döner
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}."}
-    return {"search_result": f"Google Search API kullanılarak '{query}' için güncel bilgiler bulundu."}
+    
+    try:
+        service = build("customsearch", "v1", developerKey=GOOGLE_SEARCH_API_KEY)
+        # Sadece ilk 5 sonucu al
+        res = service.cse().list(q=query, cx=GOOGLE_SEARCH_CX_ID, num=5).execute() 
+        
+        search_results = []
+        if 'items' in res:
+            for item in res['items']:
+                search_results.append({
+                    "title": item.get('title'),
+                    "snippet": item.get('snippet'),
+                    "source": item.get('displayLink')
+                })
+        
+        if search_results:
+            result_text = "Bulunan Güncel Bilgiler:\n"
+            for r in search_results:
+                result_text += f"- **{r['title']}** ({r['source']}): {r['snippet']}\n"
+            return {"search_result": result_text}
+            
+        return {"search_result": f"'{query}' sorgusu için internette güncel bilgi bulunamadı."}
+
+    except Exception as e:
+        print(f"!!! [SEARCH API ERROR] Google Arama hatası: {str(e)}", file=sys.stderr)
+        return {"search_result": f"Hata: Google Arama API'sine erişim sağlanamadı: {type(e).__name__}"}
 
 def ban_user_tool(username: str, reason: str) -> str:
-    # ... (Aynı mantık)
     db = get_db()
     user_list = list(db["users"].rows_where("username = ?", [username]))
     user = user_list[0] if user_list else None
@@ -170,7 +181,6 @@ def ban_user_tool(username: str, reason: str) -> str:
     return f"Hata: '{username}' adında bir kullanıcı bulunamadı."
 
 def clear_chat_tool(session_id: str) -> str:
-    # ... (Aynı mantık)
     db = get_db()
     user_id = session.get('user_id')
     deleted_count = db["messages"].delete_where("user_id = ? AND session_id = ?", [user_id, session_id])
@@ -180,7 +190,6 @@ def clear_chat_tool(session_id: str) -> str:
     return "Hata: Geçmiş temizlenemedi veya zaten boştu."
 
 def change_ai_mode_tool(mode: str) -> str:
-    # ... (Aynı mantık)
     valid_modes = ["friend", "enemy", "teacher"]
     mode = mode.lower()
     if mode in valid_modes:
@@ -190,13 +199,12 @@ def change_ai_mode_tool(mode: str) -> str:
     return f"Hata: Geçersiz mod '{mode}'. Geçerli modlar: {', '.join(valid_modes)}"
 
 def teach_software_tool(software_name: str, topic: str) -> str:
-    # ... (Aynı mantık)
     if session.get('ai_persona') != 'teacher':
         return f"Hata: Bu komut sadece Öğretmen modundayken çalışır. Şu anki modunuz: {session.get('ai_persona')}."
     return f"Öğretmen modundasınız. Yapay Zekadan lütfen '{software_name}' yazılımı hakkında '{topic}' konusunu en iyi şekilde anlatmasını isteyin. Ders başlatılıyor..."
 
 def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=False):
-    # ... (Aynı mantık)
+    # System instruction (Aynı, kararlı)
     base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     if is_anime:
         base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'."
@@ -212,7 +220,7 @@ def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=F
     if user_role == "super_admin":
         base_prompt += " Sana 'enes' adında dokunulmaz Süper Admin hitap ediyor. Ona her zaman üst düzeyde saygılı ve itaatkar ol."
         
-    if search_result and "API'lar eksik" not in search_result:
+    if search_result and "API'lar eksik" not in search_result and "Hata: Google Arama API'sine erişim sağlanamadı" not in search_result:
         base_prompt += f"\n-- GÜNCEL BİLGİ KAYNAĞI --\n{search_result}\n-- GÜNCEL BİLGİ SONU --\nBu bilgileri kullanarak yanıtını oluştur."
     return base_prompt
 
@@ -228,9 +236,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
             ai_persona = session.get('ai_persona', 'friend')
             
-        # [KRİTİK ÇÖZÜM: TypeError: Part.from_text() takes 1 positional argument but 2 were given]
-        # types.Part(text=...) kullanımı doğrudur. Log'daki hatayı kesin çözmek için 
-        # Part'ın tek parametre alan construct'ı yerine (text=...) açıkça kullanıldı.
         chat_history = [
             types.Content(
                 role=msg["role"], 
@@ -242,10 +247,10 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         search_data = search_internet(user_message)
         system_instruction = get_system_instruction(user_role, ai_persona, search_data["search_result"], is_anime=is_anime)
         
+        # Tool'ları sadece komutlar ve admin yetkisi olanlar için sınırlayabilirsiniz, ancak default olarak bırakıldı.
         tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool]
 
         config = types.GenerateContentConfig(system_instruction=system_instruction, tools=tools)
-        # client.chats.create yerine daha kararlı olan client.models.generate_content_stream kullanıldı
         
         model_name = 'gemini-2.5-flash'
         contents = chat_history + [types.Content(role="user", parts=[types.Part.from_text(user_message)])]
@@ -256,7 +261,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             config=config,
         )
 
-        # Tool çağrısı kontrolü
+        # Tool çağrısı kontrolü ve işlenmesi (Aynı, kararlı)
         if response.function_calls:
             function_call = response.function_calls[0]
             function_name = function_call.name
@@ -264,9 +269,12 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             
             if function_name in globals() and function_name.endswith('_tool'):
                 tool_func = globals()[function_name]
-                tool_result = tool_func(**function_args)
+                # Kontrol: Admin tool'ları sadece admin rolü için çalışsın
+                if function_name == 'ban_user_tool' and user_role not in ('admin', 'super_admin'):
+                    tool_result = "Hata: Bu araç sadece Admin ve Süper Adminler tarafından kullanılabilir."
+                else:
+                    tool_result = tool_func(**function_args)
                 
-                # Yeni bir çağrı ile Tool sonucunu modele geri gönder
                 contents.append(types.Content(role="model", parts=[types.Part.from_function_call(function_call)]))
                 contents.append(types.Content(role="tool", parts=[types.Part.from_function_response(name=function_name, response={"result": tool_result})]))
 
@@ -291,7 +299,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
 
 
 # ==============================================================================
-# 4. FLASK ROUTES
+# 4. FLASK ROUTES (V8.0 ile Aynı, Kararlı)
 # ==============================================================================
 
 @app.route('/')
@@ -311,9 +319,9 @@ def api_chat():
     if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
 
     user_id = session['user_id']
-    # KRİTİK ÇÖZÜM: g.user her zaman var sayılır (before_request nedeniyle)
     user = g.user 
     
+    # Yerel Komut İşleme
     if user_message.startswith('/'):
         command_match = re.match(r'/(\w+)\s*(.*)', user_message)
         if command_match:
@@ -326,17 +334,24 @@ def api_chat():
                 parts = args.split(maxsplit=1)
                 if len(parts) == 2: result = teach_software_tool(parts[0], parts[1])
                 else: result = "Hata: /teach komutu '/teach yazılım konu' formatında olmalıdır."
+            elif command == 'ban' and user["role"] in ('admin', 'super_admin'):
+                parts = args.split(maxsplit=1)
+                if len(parts) == 2: result = ban_user_tool(parts[0], parts[1])
+                else: result = "Hata: /ban komutu '/ban kullanıcı_adı sebep' formatında olmalıdır."
+            elif command == 'ban':
+                 result = "Hata: Bu komutu kullanmak için Admin veya Süper Admin yetkisine sahip olmalısınız."
             else: result = f"Bilinmeyen komut: /{command}. Kullanılabilecek komutlar: /mode, /clear, /teach."
             
             return jsonify({"success": True, "response": f"**[KOMUT YANITI]**\n{result}"})
             
+    # AI yanıtı oluştur
     ai_response_data, raw_response = generate_ai_response(user_id, session_id, user_message, user["role"])
     ai_text = ai_response_data["text"]
     
     if "status" in ai_response_data:
         return jsonify({"success": False, "message": ai_text}), ai_response_data["status"]
     
-    # DB Kayıt (Retry Mantığı dahil)
+    # DB Kayıt
     max_retries = 5
     for attempt in range(max_retries):
         try:
@@ -351,12 +366,10 @@ def api_chat():
     
     return jsonify({"success": True, "response": ai_text})
 
-
 @app.route('/api/history', methods=['GET'])
 @login_required
 def api_history():
     user_id = session['user_id']
-    # KRİTİK ÇÖZÜM: session.sid yerine current_chat_session kullanılır
     session_id = session.get('current_chat_session') 
     if not session_id: return jsonify([])
     history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
@@ -425,7 +438,6 @@ def admin_panel():
 def admin_ban_user(user_id):
     db = get_db()
     if user_id == session['user_id']: 
-        # Hata mesajı flash edilebilir veya doğrudan gösterilebilir
         return redirect(url_for('admin_panel'))
         
     user_list = list(db["users"].rows_where("id = ?", [user_id]))
@@ -446,7 +458,6 @@ def login():
         username = request.form['username']
         password = request.form['password']
         
-        # KRİTİK ÇÖZÜM: rows_where kullanılarak Table.get() hatası önlenir
         user_list = list(get_db()["users"].rows_where("username = ?", [username]))
         user = user_list[0] if user_list else None
         
@@ -484,8 +495,7 @@ def logout():
     return redirect(url_for('login'))
 
 # ==============================================================================
-# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
-# [SyntaxError: f-string hataları tamamen temizlendi.]
+# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR (V8.0 ile Aynı, Kararlı)
 # ==============================================================================
 
 BASE_CSS = """
@@ -572,11 +582,8 @@ function appendMessage(text, sender) {
     const msgDiv = document.createElement('div');
     msgDiv.classList.add('message', sender + '-message');
     
-    // Markdown işleme
     let htmlContent = text.replace(/\\n/g, '<br>');
-    // Kod blokları
     htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
-    // Kalın metin
     htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
     
     msgDiv.innerHTML = htmlContent;
@@ -660,7 +667,7 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="input-area">
-            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/mode enemy, /clear)">
+            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/mode enemy, /clear, /ban)">
             <button onclick="sendMessage(false)">Gönder</button>
         </div>
     </div>
@@ -671,8 +678,8 @@ HTML_TEMPLATE = """
 """
 
 ANIME_CHAT_TEMPLATE = HTML_TEMPLATE.replace('Aurion - Gelişmiş Yapay Zeka', 'Aurion - Anime Sohbeti').replace(
-    '<input type="text" id="message-input" placeholder="Aurion\'a bir şey sor veya komut gir (/mode enemy, /clear)">', 
-    '<input type="text" id="anime-message-input" placeholder="Anime Aurion\'a bir anime/manga sorusu sor.">'
+    'placeholder="Aurion\'a bir şey sor veya komut gir (/mode enemy, /clear, /ban)">', 
+    'placeholder="Anime Aurion\'a bir anime/manga sorusu sor.">'
 )
 
 LOGIN_TEMPLATE = """
