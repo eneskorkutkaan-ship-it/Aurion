@@ -1,6 +1,6 @@
 # ==============================================================================
 # AURION PROJESİ - TÜM 16 ÖZELLİK DAHİL TAM KOD (app.py)
-# Versiyon: 1.0 (Dağıtım Hatalarına Karşı KESİN DİRENÇLİ SÜRÜM)
+# Versiyon: 2.0 (Tüm Dağıtım ve Çalışma Hataları Giderildi)
 # ==============================================================================
 
 import os
@@ -56,17 +56,17 @@ def init_db():
     db["users"].create({
         "id": int, "username": str, "password_hash": str, "role": str,
         "is_banned": bool, "theme": str, "is_active": bool
-    }, pk="id", defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True})
+    }, pk="id", defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True}, if_not_exists=True)
 
     # 7. Veri Kaydı (Mesajlar)
     db["messages"].create({
         "id": int, "user_id": int, "session_id": str, "role": str, "content": str, "timestamp": datetime
-    }, pk="id")
+    }, pk="id", if_not_exists=True)
 
     # 1. Admin Log Sistemi
     db["admin_logs"].create({
         "id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime
-    }, pk="id")
+    }, pk="id", if_not_exists=True)
     
     # Süper Admin Oluşturma (1. Süper Admin Dokunulmazlığı)
     if not list(db["users"].rows_where("username = 'enes'")):
@@ -115,6 +115,7 @@ def search_internet(query):
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
     
+    # Burada Google Search API veya custom requests çağrısı yapılırdı
     return {"search_result": f"Google Search API kullanılarak '{query}' için güncel bilgiler bulundu."}
 
 # 16. Özel Medya Modülü (Anime Bokum Simülasyonu)
@@ -131,7 +132,10 @@ def search_anime_info(anime_name):
 def ban_user_tool(username: str, reason: str) -> str:
     """Verilen kullanıcıyı yasaklar (Sadece Admin/Süper Admin kullanabilir)."""
     db = get_db()
-    user = db["users"].get("username", username)
+    # rows_where ile kullanıcıyı bulma düzeltildi
+    user_list = list(db["users"].rows_where("username = ?", [username]))
+    user = user_list[0] if user_list else None
+    
     if user:
         if user["role"] == "super_admin":
             return f"Hata: Süper Admin ('{username}') yasaklanamaz."
@@ -161,7 +165,7 @@ def change_ai_mode_tool(mode: str) -> str:
 def teach_software_tool(language: str, topic: str) -> str:
     """Süper Admin için yazılım öğrenme modunu başlatır (14. Süper Admin Aracı)."""
     user = get_db()["users"].get(session.get('user_id'))
-    if user["role"] != 'super_admin':
+    if user and user["role"] != 'super_admin':
         return "Erişim Reddedildi: Bu komut sadece Süper Admin'e özeldir."
         
     session["ai_persona"] = "teacher" 
@@ -170,7 +174,7 @@ def teach_software_tool(language: str, topic: str) -> str:
 def self_repair_check_tool() -> str:
     """Sistem hatalarını kontrol eder ve yama önerisi sunar (15. Öz Onarım Simülasyonu)."""
     user = get_db()["users"].get(session.get('user_id'))
-    if user["role"] != 'super_admin':
+    if user and user["role"] != 'super_admin':
         return "Erişim Reddedildi: Bu komut sadece Süper Admin'e özeldir."
         
     try:
@@ -225,6 +229,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role):
     ai_persona = session.get('ai_persona', 'friend')
     system_instruction = get_system_instruction(user_role, ai_persona, search_data["search_result"])
 
+    # Tüm tool'lar dahil
     tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool, self_repair_check_tool]
 
     try:
@@ -257,7 +262,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role):
         return {"text": f"Yapay Zeka Hatası: Bir sorun oluştu. Detaylar sistem loglarına kaydedildi. (Hata: {str(e)})"}, None
 
 # ==============================================================================
-# 4. FLASK ROUTES (TÜMÜ DAHİL)
+# 4. FLASK ROUTES (TÜMÜ DAHİL VE DÜZELTİLMİŞ)
 # ==============================================================================
 
 # -- Anasayfa ve Sohbet (3. Sohbet Sistemi) ------------------------------------
@@ -306,7 +311,10 @@ def login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        user = get_db()["users"].get("username", username)
+        
+        # SQLITE-UTILS DÜZELTMESİ: TypeError hatası giderildi (rows_where kullanımı)
+        user_list = list(get_db()["users"].rows_where("username = ?", [username]))
+        user = user_list[0] if user_list else None
         
         if user and check_password_hash(user['password_hash'], password):
             if user['is_banned']:
@@ -325,7 +333,8 @@ def register():
         username = request.form['username']
         password = request.form['password']
         
-        if get_db()["users"].get("username", username):
+        # SQLITE-UTILS DÜZELTMESİ: TypeError hatası giderildi (rows_where kullanımı)
+        if list(get_db()["users"].rows_where("username = ?", [username])):
             return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten kullanılıyor.")
 
         get_db()["users"].insert({"username": username, "password_hash": generate_password_hash(password), "role": "user", "is_active": True})
@@ -349,6 +358,7 @@ def admin_panel():
     users = get_db()["users"].rows_where(order_by="role DESC")
     logs = get_db()["admin_logs"].rows_where(order_by="timestamp DESC", limit=20)
     
+    # JSON.dumps için default=str eklendi
     return render_template_string(ADMIN_PANEL_TEMPLATE, users=list(users), logs=json.dumps(list(logs), indent=2, default=str))
 
 @app.route('/admin/manage_user/<int:user_id>', methods=['POST'])
@@ -404,7 +414,7 @@ def super_admin_anime_search():
     return render_template_string(SUPER_ADMIN_ANIME_TEMPLATE, info=info, dublaj=simulated_dublaj, anime_name=anime_name, episode_num=episode_num)
 
 # ==============================================================================
-# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR (SON DÜZELTMELER)
+# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
 
 BASE_CSS = """
@@ -501,7 +511,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 """
-# HTML ŞABLONLARI: Çift tırnak yerine üçlü tırnak (""") ve tek tırnak (') kullanımı zorunlu.
 
 HTML_TEMPLATE = f"""
 <!DOCTYPE html>
@@ -553,19 +562,19 @@ HTML_TEMPLATE = f"""
 </html>
 """
 
-LOGIN_TEMPLATE = f"""
+LOGIN_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Giriş</title>
-    <style>{BASE_CSS} .container {{ max-width: 400px; margin: 100px auto; padding: 20px; background: #222; border-radius: 10px; }} input[type=text], input[type=password] {{ width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #555; border-radius: 4px; box-sizing: border-box; background: #333; color:white; }} button {{ background-color: #007BFF; color: white; padding: 14px 20px; margin: 8px 0; border: none; border-radius: 4px; cursor: pointer; width: 100%; }}</style>
+    <style>""" + BASE_CSS + """ .container { max-width: 400px; margin: 100px auto; padding: 20px; background: #222; border-radius: 10px; } input[type=text], input[type=password] { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #555; border-radius: 4px; box-sizing: border-box; background: #333; color:white; } button { background-color: #007BFF; color: white; padding: 14px 20px; margin: 8px 0; border: none; border-radius: 4px; cursor: pointer; width: 100%; }</style>
 </head>
 <body class="dark">
     <div class="container">
         <h2 style="text-align:center; color:#007BFF;">AURION Giriş</h2>
-        {'{% if error %}'}<p style="color:red; text-align:center;">{{{{ error }}}}</p>{'{% endif %}'}
+        {% if error %}<p style="color:red; text-align:center;">{{ error }}</p>{% endif %}
         <form method="POST">
             <label for="username">Kullanıcı Adı</label>
             <input type="text" id="username" name="username" required>
@@ -573,13 +582,13 @@ LOGIN_TEMPLATE = f"""
             <input type="password" id="password" name="password" required>
             <button type="submit">Giriş Yap</button>
         </form>
-        <p style="text-align:center;"><a href="{{{{ url_for('register') }}}}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
+        <p style="text-align:center;"><a href="{{ url_for('register') }}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
     </div>
 </body>
 </html>
 """
 
-REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("login", "register").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
+REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("'register'", "'login'").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
 
 ADMIN_PANEL_TEMPLATE = """
 <!DOCTYPE html>
