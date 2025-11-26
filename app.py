@@ -751,4 +751,12 @@ ADMIN_PANEL_TEMPLATE = """
 # ==============================================================================
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # *** Bu blok sadece yerel geliştirme için kullanılır ***
+    # Production ortamlarında (Render) Gunicorn tarafından çağrılacaktır.
+    try:
+        app.run(debug=True)
+    except Exception as e:
+        print(f"!!! [AURION INIT ERROR] Uygulama yerel olarak başlatılamadı: {str(e)}", file=sys.stderr)
+
+# Yeni kodda değişiklik bu kadar. app:app komutunda Gunicorn, Flask uygulamasını
+# doğrudan Flask nesnesi olarak kullanır, bu yüzden alt blok Render'da çalışmaz.
