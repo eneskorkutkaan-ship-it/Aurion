@@ -1,6 +1,6 @@
 # ==============================================================================
-# AURION PROJESİ - NİHAİ VE EN GÜVENİLİR VERSİYON (app.py)
-# Versiyon: 4.0 (Tüm Kritik Hatalar Giderildi)
+# AURION PROJESİ - YÜKSEK STABİLİTE SÜRÜMÜ (app.py)
+# Versiyon: 4.1 (Tüm Kritik Render Hataları Giderildi)
 # ==============================================================================
 
 import os
@@ -24,7 +24,7 @@ import time
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
-# Render'da ayarlanacak SECRET_KEY'e öncelik verilir.
+# Render'da ayarlanacak SECRET_KEY'e öncelik verilir. En az 32 karakter önerilir.
 SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
 
 DATABASE_URL = "aurion.db"
@@ -38,7 +38,6 @@ app.config['SESSION_PERMANENT'] = True
 client = None
 if GEMINI_API_KEY:
     try:
-        # Gemini Client'ı oluştur
         client = genai.Client(api_key=GEMINI_API_KEY)
         print(">>> [AURION START OK] Gemini istemcisi başarıyla başlatıldı.", file=sys.stdout)
     except Exception as e:
@@ -55,10 +54,11 @@ def get_db(max_retries=5, delay=1):
     for attempt in range(max_retries):
         try:
             if 'db' not in g:
-                # Gunicorn için uyumlu timeout ayarları (varsayılan 5 saniyeden artırıldı)
+                # Gunicorn için uyumlu timeout ayarları (5 saniyeden 15 saniyeye yükseltildi)
                 g.db = sqlite_utils.Database(DATABASE_URL, timeout=15) 
             return g.db
         except sqlite_utils.db.OperationalError as e:
+            # Hata kodu: 1000002563.jpg
             print(f"!!! [DB ACCESS RETRY] DB kilitlenme hatası. Yeniden deneme ({attempt + 1}/{max_retries}). Hata: {str(e)}", file=sys.stderr)
             if attempt < max_retries - 1:
                 time.sleep(delay)
@@ -132,7 +132,9 @@ def role_required(required_role):
 # Dummy tool'lar, Gemini tarafından çağrılmak üzere.
 def search_internet(query):
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
+        # API anahtarları eksikse basit bir yanıt döndürülür
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
+    # Gerçek API çağrısı bu fonksiyonda yer alacaktır.
     return {"search_result": f"Google Search API kullanılarak '{query}' için güncel bilgiler bulundu."}
 
 def ban_user_tool(username: str, reason: str) -> str:
@@ -241,12 +243,11 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
             ai_persona = session.get('ai_persona', 'friend')
             
-        # KRİTİK HATA DÜZELTMESİ (v3.1 yamasından alındı): 
-        # TypeError: Part.from_text() takes 1 positional argument but 2 were given hatasını çözer.
+        # KRİTİK HATA DÜZELTMESİ (TypeError: Part.from_text() çözümü): 
         chat_history = [
             types.Content(
                 role=msg["role"], 
-                parts=[types.Part(text=msg["content"])]
+                parts=[types.Part(text=msg["content"])] # types.Part.from_text() yerine doğrudan text argümanı kullanıldı.
             ) 
             for msg in history
         ]
@@ -313,6 +314,7 @@ def make_session_permanent_and_assign_id():
 @login_required
 def index():
     user = get_db()["users"].get(session['user_id'])
+    # Hata kodu: sc.jpeg ve 1000002544.jpg (SyntaxError) çözümü için şablon str dışında tutuldu.
     return render_template_string(HTML_TEMPLATE, user=user, is_super_admin=(user['role'] == 'super_admin'))
 
 @app.route('/api/chat', methods=['POST'])
@@ -358,8 +360,10 @@ def api_chat():
 @login_required
 def api_history():
     user_id = session['user_id']
+    # AttributeError: 'sid' hatasını çözmek için doğrudan 'current_chat_session' kullanılıyor.
     session_id = session.get('current_chat_session') 
-    # Session ID'yi kullanan doğru sorgu (AttributeError çözümü)
+    
+    # Session ID'yi kullanan doğru sorgu
     history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
     return jsonify(history)
 
@@ -427,7 +431,7 @@ def login():
         username = request.form['username']
         password = request.form['password']
         
-        # TypeError (Table.get 3 argüman) hatasını çözmek için kararlı yöntem kullanılıyor.
+        # Hata kodu: 1000002548.jpg, 1000002550.jpg (TypeError: Table.get() 3 argüman) çözümü:
         user_list = list(get_db()["users"].rows_where("username = ?", [username]))
         user = user_list[0] if user_list else None
         
@@ -449,6 +453,7 @@ def register():
         username = request.form['username']
         password = request.form['password']
         
+        # Hata kodu: 1000002551.jpg (TypeError: Table.get() 3 argüman) çözümü:
         if list(get_db()["users"].rows_where("username = ?", [username])):
             return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten kullanılıyor.")
 
@@ -692,7 +697,7 @@ ANIME_CHAT_TEMPLATE = f"""
         <hr style="border-color:#FFD700;">
 
         <nav style="flex-grow:1;">
-            <a href="{{{{ url_for('index') }}}}" style="display:block; margin-bottom:10px; color:inherit; text-decoration:none;">⬅️ Normal Sohbet</a>
+            <a href="{{{{ url_for('index') }}}}" style="display:block; margin-bottom:10px; color:inherit; text-decoration:none;">⬅️ Normal Sohbet'e Dön</a>
             <a href="{{{{ url_for('admin_panel') }}}}" style="display:block; margin-bottom:10px; color:#FFA500; text-decoration:none;">🛡️ Admin Paneli</a>
         </nav>
         
@@ -743,7 +748,7 @@ LOGIN_TEMPLATE = """
 
 REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("'register'", "'login'").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
 
-# KRİTİK SyntaxError'ı çözen, Jinja ifadelerinde tırnak işaretlerini hatasız kullanan yapı:
+# KRİTİK SyntaxError'ı çözen, Jinja ifadelerinde tırnak işaretlerini hatasız kullanan yapı (sc.jpeg):
 ADMIN_PANEL_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
