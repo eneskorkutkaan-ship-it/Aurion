@@ -1,6 +1,6 @@
 # ==============================================================================
-# AURION PROJESİ - SON VE KESİN VERSİYON (app.py)
-# Versiyon: 3.0 (Tüm Syntax/Type/DB Hataları Düzeltildi)
+# AURION PROJESİ - NİHAİ VE EN GÜVENİLİR VERSİYON (app.py)
+# Versiyon: 4.0 (Tüm Kritik Hatalar Giderildi)
 # ==============================================================================
 
 import os
@@ -13,10 +13,9 @@ from flask_limiter.util import get_remote_address
 from google import genai
 from google.genai import types
 import json
-import re
 import sys 
 import uuid 
-import time # Kritik: SQLite kilitlenmelerinde yeniden deneme için
+import time 
 
 # ==============================================================================
 # 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER 
@@ -39,6 +38,7 @@ app.config['SESSION_PERMANENT'] = True
 client = None
 if GEMINI_API_KEY:
     try:
+        # Gemini Client'ı oluştur
         client = genai.Client(api_key=GEMINI_API_KEY)
         print(">>> [AURION START OK] Gemini istemcisi başarıyla başlatıldı.", file=sys.stdout)
     except Exception as e:
@@ -47,27 +47,24 @@ else:
     print("!!! [AURION START WARNING] GEMINI_API_KEY çevresel değişkeni bulunamadı.", file=sys.stderr)
 
 # ==============================================================================
-# 1. VERİTABANI VE İLK KURULUM (SQLite Kilitlenme Çözümü)
+# 1. VERİTABANI VE İLK KURULUM (SQLite Kilitlenme Çözümü ve Geliştirme)
 # ==============================================================================
 
-def get_db(max_retries=3, delay=1):
+def get_db(max_retries=5, delay=1):
     """Veritabanı bağlantısını döndürür ve kilitlenme (OperationalError) durumunda yeniden dener."""
     for attempt in range(max_retries):
         try:
             if 'db' not in g:
-                # Gunicorn için uyumlu timeout ve bağlantı ayarları
-                g.db = sqlite_utils.Database(DATABASE_URL, timeout=10) 
+                # Gunicorn için uyumlu timeout ayarları (varsayılan 5 saniyeden artırıldı)
+                g.db = sqlite_utils.Database(DATABASE_URL, timeout=15) 
             return g.db
         except sqlite_utils.db.OperationalError as e:
-            # OperationalError (DB kilitlenme hatası)
             print(f"!!! [DB ACCESS RETRY] DB kilitlenme hatası. Yeniden deneme ({attempt + 1}/{max_retries}). Hata: {str(e)}", file=sys.stderr)
             if attempt < max_retries - 1:
                 time.sleep(delay)
             else:
-                # Maksimum denemeden sonra hata fırlat
                 raise RuntimeError("Veri tabanı bağlantısı kurulamıyor (Maksimum deneme aşıldı).")
         except Exception as e:
-            # Diğer tüm hatalar
             print(f"!!! [DB ACCESS ERROR] Veri tabanına erişim sağlanamadı: {str(e)}", file=sys.stderr)
             raise RuntimeError("Veri tabanı bağlantısı kurulamıyor.")
 
@@ -80,6 +77,7 @@ def close_db(e=None):
 def init_db():
     try:
         db = get_db()
+        # Tablolar oluşturuluyor
         db["users"].create({"id": int, "username": str, "password_hash": str, "role": str, "is_banned": bool, "theme": str, "is_active": bool}, pk="id", defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True}, if_not_exists=True)
         db["messages"].create({"id": int, "user_id": int, "session_id": str, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         db["admin_logs"].create({"id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime}, pk="id", if_not_exists=True)
@@ -96,6 +94,7 @@ def init_db():
 with app.app_context():
     init_db()
 
+# Limiter ayarları (DDoS ve spam koruması)
 limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"], storage_uri="memory://")
 
 # ==============================================================================
@@ -130,6 +129,7 @@ def role_required(required_role):
 # 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI 
 # ==============================================================================
 
+# Dummy tool'lar, Gemini tarafından çağrılmak üzere.
 def search_internet(query):
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
@@ -155,8 +155,11 @@ def clear_chat_tool() -> str:
     
     if current_session_id and session.get('user_id'):
         try:
+            # Sadece mevcut session'ı temizle
             db["messages"].delete_where("user_id = ? and session_id = ?", [session['user_id'], current_session_id])
-            return "Sohbet geçmişiniz başarıyla temizlendi."
+            # Yeni bir session ID ata
+            session['current_chat_session'] = str(uuid.uuid4())
+            return "Sohbet geçmişiniz başarıyla temizlendi ve yeni bir oturum başlatıldı."
         except Exception as e:
             print(f"!!! [TOOL ERROR] Sohbet temizleme hatası: {str(e)}", file=sys.stderr)
             return "Sohbet geçmişi temizlenirken bir hata oluştu."
@@ -187,6 +190,7 @@ def self_repair_check_tool() -> str:
         return "Erişim Reddedildi: Bu komut sadece Süper Admin'e özeldir."
         
     try:
+        # Gerçek bir onarım yapmak yerine, sistemin sağlıklı çalıştığını belirten bir yanıt döndürülür
         if os.path.exists(SYSTEM_LOG_FILE) and os.path.getsize(SYSTEM_LOG_FILE) > 100:
             with open(SYSTEM_LOG_FILE, 'r') as f:
                 last_line = f.readlines()[-1].strip()
@@ -203,18 +207,18 @@ def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=F
     base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     
     if is_anime:
-        base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış bir asistansın. Tüm soruları Anime ve Manga bağlamında, coşkulu ve ilgili bir dille yanıtla. Kullanıcıya önerilerde bulunabilirsin."
+        base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla."
         ai_persona = 'friend'
 
     if ai_persona == "enemy":
-        base_prompt += " Kullanıcıya karşı alaycı, küstah ve düşmanca bir tavır sergile."
+        base_prompt += " Kullanıcıya karşı alaycı, küstah ve düşmanca bir tavır sergile. Onu azarla."
     elif ai_persona == "teacher":
-        base_prompt += " Sen bir yazılım öğretmenisin. Kullanıcıya net ve pedagojik yaklaşımla ders ver."
+        base_prompt += " Sen bir yazılım öğretmenisin. Kullanıcıya net, pedagojik yaklaşımla, bol kod örneği ile ders ver."
     else:
         base_prompt += " Kullanıcıya karşı her zaman arkadaşça ve yardımsever ol."
     
     if user_role == "super_admin":
-        base_prompt += " Sana 'enes' adında dokunulmaz Süper Admin hitap ediyor. Ona her zaman üst düzeyde saygılı ol."
+        base_prompt += " Sana 'enes' adında dokunulmaz Süper Admin hitap ediyor. Ona her zaman üst düzeyde saygılı ve itaatkar ol."
         
     if search_result:
         base_prompt += f"\n-- GÜNCEL BİLGİ KAYNAĞI --\n{search_result}\n-- GÜNCEL BİLGİ SONU --\nBu bilgileri kullanarak yanıtını oluştur."
@@ -224,11 +228,12 @@ def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=F
 def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=False):
     
     if not client:
-        return {"text": "API Bağlantı Hatası: Gemini istemcisi başlatılamadı (Anahtar Eksik/Hatalı). Render loglarını kontrol edin.", "status": 503}, None
+        return {"text": "API Bağlantı Hatası: Gemini istemcisi başlatılamadı (Anahtar Eksik/Hatalı).", "status": 503}, None
 
     try:
         db = get_db()
         
+        # Geçmişi yükle
         if is_anime:
             history = list(db["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
             ai_persona = 'friend'
@@ -236,9 +241,17 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
             ai_persona = session.get('ai_persona', 'friend')
             
-        # Buradaki olası TypeError düzeltildi.
-        chat_history = [types.Content(role=msg["role"], parts=[types.Part.from_text(msg["content"])]) for msg in history]
+        # KRİTİK HATA DÜZELTMESİ (v3.1 yamasından alındı): 
+        # TypeError: Part.from_text() takes 1 positional argument but 2 were given hatasını çözer.
+        chat_history = [
+            types.Content(
+                role=msg["role"], 
+                parts=[types.Part(text=msg["content"])]
+            ) 
+            for msg in history
+        ]
         
+        # System Instruction ve Tool ayarları
         search_data = search_internet(user_message)
         system_instruction = get_system_instruction(user_role, ai_persona, search_data["search_result"], is_anime=is_anime)
 
@@ -248,10 +261,12 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             system_instruction=system_instruction, 
             tools=tools
         )
-        chat = client.chats.create(model='gemini-2.5-flash', history=chat_history, config=config)
         
+        # Sohbet nesnesini oluştur ve mesaj gönder
+        chat = client.chats.create(model='gemini-2.5-flash', history=chat_history, config=config)
         response = chat.send_message(user_message)
 
+        # Tool kullanımı kontrolü
         if response.function_calls:
             tool_call = response.function_calls[0]
             function_name = tool_call.name
@@ -261,6 +276,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             tool_result = function_to_call(**args)
             
             if tool_result:
+                # Aracı çalıştırma yanıtını tekrar modele gönder
                 response = chat.send_message(types.Part.from_function_response(name=function_name, response={"result": tool_result}))
                 return {"text": response.text}, response
             
@@ -272,6 +288,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         error_type = type(e).__name__
         error_message = f"Yapay Zeka Erişimi Hatası: Sunucu zaman aşımı veya harici bir sorun oluştu. (Hata Kodu: {error_type})."
         
+        # Hata kaydı (Self-repair tool için)
         with open(SYSTEM_LOG_FILE, 'a') as f:
             f.write(f"[{datetime.now()}] AI_RUNTIME_ERROR: Type={error_type}, Message={str(e)}\n")
             
@@ -284,10 +301,10 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
 @app.before_request
 def make_session_permanent_and_assign_id():
     session.permanent = True
-    # Oturumun mutlaka bir ID'si olduğundan emin olun
+    # Oturum ID'si kontrolü
     if 'current_chat_session' not in session:
         session['current_chat_session'] = str(uuid.uuid4())
-    # AttributeError: 'SecureCookieSession' object has no attribute 'sid' hatasını gidermek için
+    # Oturumdaki kullanıcı objesini g nesnesine ata
     if 'user_id' in session and 'user_id' not in g:
         g.user = get_db()["users"].get(session['user_id'])
 
@@ -318,14 +335,14 @@ def api_chat():
         http_status = ai_response_data["status"]
         return jsonify({"success": False, "message": ai_text}), http_status
     
-    # DB YAZMA İŞLEMİNİ 3 KEZ DENEYEN BLOK (SQLite Kilitlenme Çözümü)
-    max_retries = 3
+    # DB YAZMA İŞLEMİNİ 5 KEZ DENEYEN BLOK (SQLite Kilitlenme Çözümü)
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             db = get_db()
             db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
             db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
-            break  # Başarılı olursa döngüden çık
+            break 
         except sqlite_utils.db.OperationalError as e:
             print(f"!!! [DB CHAT WRITE RETRY] DB yazma hatası. Yeniden deneme ({attempt + 1}/{max_retries}). Hata: {str(e)}", file=sys.stderr)
             if attempt == max_retries - 1:
@@ -342,7 +359,7 @@ def api_chat():
 def api_history():
     user_id = session['user_id']
     session_id = session.get('current_chat_session') 
-    # History API rotasında hata yönetimi kaldırıldı, çünkü 'get_db' zaten yeniden deneme yapıyor.
+    # Session ID'yi kullanan doğru sorgu (AttributeError çözümü)
     history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
     return jsonify(history)
 
@@ -375,8 +392,8 @@ def api_anime_chat():
         http_status = ai_response_data["status"]
         return jsonify({"success": False, "message": ai_text}), http_status
 
-    # DB YAZMA İŞLEMİNİ 3 KEZ DENEYEN BLOK (SQLite Kilitlenme Çözümü)
-    max_retries = 3
+    # DB YAZMA İŞLEMİNİ 5 KEZ DENEYEN BLOK 
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             db = get_db()
@@ -410,7 +427,7 @@ def login():
         username = request.form['username']
         password = request.form['password']
         
-        # Type error (Table.get 3 argüman) hatasını çözmek için sadece rows_where kullanılıyor.
+        # TypeError (Table.get 3 argüman) hatasını çözmek için kararlı yöntem kullanılıyor.
         user_list = list(get_db()["users"].rows_where("username = ?", [username]))
         user = user_list[0] if user_list else None
         
@@ -456,7 +473,7 @@ def admin_panel():
     users = get_db()["users"].rows_where(order_by="role DESC")
     logs = get_db()["admin_logs"].rows_where(order_by="timestamp DESC", limit=20)
     
-    # JSON loglarını stringe dönüştürürken default=str ekleyerek tarih formatı hatası çözüldü.
+    # JSON loglarını stringe dönüştürürken default=str eklenir
     return render_template_string(ADMIN_PANEL_TEMPLATE, users=list(users), logs=json.dumps(list(logs), indent=2, default=str))
 
 @app.route('/admin/manage_user/<int:user_id>', methods=['POST'])
@@ -483,9 +500,12 @@ def admin_manage_user(user_id):
         get_db()["users"].update(user_id, {"role": "user"})
         
     return redirect(url_for('admin_panel'))
+
 # ==============================================================================
-# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR (Tüm Syntax hataları giderildi)
+# 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
+
+# **SyntaxError'lardan kaçınmak için BASE_CSS ve BASE_JS tanımları f-string dışında tutuldu**
 BASE_CSS = """
 :root {
     --bg-dark: #121212;
@@ -561,7 +581,6 @@ function sendMessage(isAnime = false) {
         }
     })
     .catch(error => {
-        // İstemci Tarafı Hatası (Bağlantı kesintisi, CORS vb.)
         console.error('API İstemci Hatası:', error);
         appendMessage('Bağlantı Hatası oluştu (İstemci Tarafı). Sunucu yanıt veremedi. Detay: ' + error.message, 'ai');
     });
@@ -724,6 +743,7 @@ LOGIN_TEMPLATE = """
 
 REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("'register'", "'login'").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
 
+# KRİTİK SyntaxError'ı çözen, Jinja ifadelerinde tırnak işaretlerini hatasız kullanan yapı:
 ADMIN_PANEL_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
