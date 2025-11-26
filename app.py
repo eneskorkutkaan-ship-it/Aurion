@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - NİHAİ STABİLİTE SÜRÜMÜ (app.py)
+# AURION PROJESİ - NİHAİ KARARLI SÜRÜM (app.py)
 # Versiyon: 4.3 (Tüm Bilinen Render ve Flask/DB Hataları Giderildi)
 # ==============================================================================
 
@@ -25,13 +25,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 # Render'da ayarlanacak SECRET_KEY'e öncelik verilir. En az 32 karakter önerilir.
+# KRİTİK: Güvenli ve uzun bir anahtar session hatalarını önler.
 SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
 
 DATABASE_URL = "aurion.db"
 SYSTEM_LOG_FILE = "aurion_system.log" 
 
 app = Flask(__name__)
-app.secret_key = SECRET_KEY # KRİTİK: SecureCookieSession hatasının temel çözümü
+app.secret_key = SECRET_KEY 
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_PERMANENT'] = True
 
@@ -50,11 +51,14 @@ else:
 # ==============================================================================
 
 def get_db(max_retries=5, delay=1):
-    """Veritabanı bağlantısını döndürür ve kilitlenme (OperationalError) durumunda yeniden dener."""
+    """
+    Veritabanı bağlantısını döndürür ve kilitlenme (OperationalError) durumunda yeniden dener.
+    KRİTİK ÇÖZÜM: DB kilitlenmelerini (OperationalError / zaman aşımı) önlemek için retry logic.
+    """
     for attempt in range(max_retries):
         try:
             if 'db' not in g:
-                # Gunicorn için uyumlu timeout ayarları (15 saniyeye yükseltildi)
+                # Bağlantı timeout'u 15 saniyeye yükseltildi.
                 g.db = sqlite_utils.Database(DATABASE_URL, timeout=15) 
             return g.db
         except sqlite_utils.db.OperationalError as e:
@@ -63,6 +67,7 @@ def get_db(max_retries=5, delay=1):
             if attempt < max_retries - 1:
                 time.sleep(delay)
             else:
+                # Kalıcı hata durumunda uygulama hatası fırlatılır.
                 raise RuntimeError("Veri tabanı bağlantısı kurulamıyor (Maksimum deneme aşıldı).")
         except Exception as e:
             print(f"!!! [DB ACCESS ERROR] Veri tabanına erişim sağlanamadı: {str(e)}", file=sys.stderr)
@@ -89,7 +94,7 @@ def init_db():
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
     except Exception as e:
         print(f"!!! [DB INIT ERROR] Veri tabanı başlatma hatası: {str(e)}", file=sys.stderr)
-        # Hata durumunda sistemden çıkış, Render'ın yeniden denemesini sağlar.
+        # Hata durumunda Render'ın yeniden denemesini sağlamak için çıkış yapılır.
         sys.exit(1) 
 
 with app.app_context():
@@ -131,9 +136,9 @@ def role_required(required_role):
 # ==============================================================================
 
 def search_internet(query):
+    # Dummy fonksiyon, araç Gemini'de tanımlı.
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
-    # Gerçek API çağrısı burada yer alacak. Şimdilik dummy yanıt döndürüyoruz.
     return {"search_result": f"Google Search API kullanılarak '{query}' için güncel bilgiler bulundu."}
 
 def ban_user_tool(username: str, reason: str) -> str:
@@ -241,6 +246,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             ai_persona = session.get('ai_persona', 'friend')
             
         # KRİTİK HATA DÜZELTMESİ: Part.from_text() hatası çözüldü
+        # Content modeline uygun hale getirildi.
         chat_history = [
             types.Content(
                 role=msg["role"], 
@@ -260,6 +266,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             tools=tools
         )
         
+        # chat objesi oluşturulur, history burada yüklenir.
         chat = client.chats.create(model='gemini-2.5-flash', history=chat_history, config=config)
         response = chat.send_message(user_message)
 
@@ -271,12 +278,12 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             function_to_call = globals().get(function_name)
             tool_result = function_to_call(**args)
             
-            if tool_result:
-                response = chat.send_message(types.Part.from_function_response(name=function_name, response={"result": tool_result}))
-                return {"text": response.text}, response
+            # Aracı çalıştırdıktan sonra sonucu AI'a geri gönder.
+            response = chat.send_message(
+                types.Part.from_function_response(name=function_name, response={"result": tool_result})
+            )
+            return {"text": response.text}, response
             
-            return {"text": tool_result}, None
-
         return {"text": response.text}, response
         
     except Exception as e:
@@ -295,7 +302,8 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
 @app.before_request
 def make_session_permanent_and_assign_id():
     session.permanent = True
-    # KRİTİK ÇÖZÜM: 'sid' hatasını önlemek için güvenli session anahtarı kontrolü
+    # KRİTİK ÇÖZÜM: 'sid' hatasını önlemek için güvenli session anahtarı kontrolü.
+    # Flask session'ı yerine kendimize ait 'current_chat_session' kullanıyoruz.
     if 'current_chat_session' not in session or not session.get('current_chat_session'):
         session['current_chat_session'] = str(uuid.uuid4())
     
@@ -307,7 +315,7 @@ def make_session_permanent_and_assign_id():
 @login_required
 def index():
     user = get_db()["users"].get(session['user_id'])
-    # KRİTİK ÇÖZÜM: f-string SyntaxError'ı önlemek için şablon str dışında tutuldu.
+    # KRİTİK ÇÖZÜM: f-string/SyntaxError'ı önlemek için şablon str dışında tutuldu.
     return render_template_string(HTML_TEMPLATE, user=user, is_super_admin=(user['role'] == 'super_admin'))
 
 @app.route('/api/chat', methods=['POST'])
@@ -316,7 +324,8 @@ def index():
 def api_chat():
     data = request.json
     user_message = data.get('message', '').strip()
-    session_id = session.get('current_chat_session')
+    # session_id güvenli bir şekilde alınır.
+    session_id = session.get('current_chat_session') 
 
     if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
 
@@ -339,6 +348,7 @@ def api_chat():
             db["messages"].insert({"user_id": user_id, "session_id": session_id, "role": "model", "content": ai_text, "timestamp": datetime.now()})
             break 
         except sqlite_utils.db.OperationalError as e:
+            # DB Kilitlenmesi durumunda yeniden denenir.
             print(f"!!! [DB CHAT WRITE RETRY] DB yazma hatası. Yeniden deneme ({attempt + 1}/{max_retries}). Hata: {str(e)}", file=sys.stderr)
             if attempt == max_retries - 1:
                 print("!!! [DB CHAT WRITE FAILED] Mesaj kaydı yapılamadı (Kalıcı DB kilitlenmesi).", file=sys.stderr)
@@ -356,6 +366,10 @@ def api_history():
     # KRİTİK ÇÖZÜM: AttributeError: 'sid' hatasını çözmek için session.sid'den kesinlikle kaçınılıyor.
     session_id = session.get('current_chat_session') 
     
+    # Session ID boşsa (olmamalı ama önlem) veya user_id yoksa boş liste döndürülür.
+    if not session_id:
+         return jsonify([])
+
     history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
     return jsonify(history)
 
@@ -381,6 +395,7 @@ def api_anime_chat():
     user_id = session['user_id']
     user = get_db()["users"].get(user_id)
     
+    # Anime modülünde session_id'ye gerek yok, user_id yeterli.
     ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True)
     ai_text = ai_response_data["text"]
 
@@ -470,6 +485,7 @@ def admin_panel():
     users = get_db()["users"].rows_where(order_by="role DESC")
     logs = get_db()["admin_logs"].rows_where(order_by="timestamp DESC", limit=20)
     
+    # JSON verisi stringe dönüştürülür
     return render_template_string(ADMIN_PANEL_TEMPLATE, users=list(users), logs=json.dumps(list(logs), indent=2, default=str))
 
 @app.route('/admin/manage_user/<int:user_id>', methods=['POST'])
