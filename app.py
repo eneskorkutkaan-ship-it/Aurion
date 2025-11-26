@@ -1,6 +1,6 @@
 # ==============================================================================
 # AURION PROJESİ - GÜNCEL KOD (app.py)
-# Versiyon: 2.1 (Bağlantı Hatası ve Anime Chat Düzeltmeleri)
+# Versiyon: 2.2 (API Anahtarı Okuma/Teşhis Güçlendirmesi)
 # ==============================================================================
 
 import os
@@ -14,13 +14,13 @@ from google import genai
 from google.genai import types
 import json
 import re
-import sys
+import sys # Logları stdout/stderr'e daha net basmak için eklendi
 
 # ==============================================================================
 # 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER (RENDER.COM İÇİN)
 # ==============================================================================
 
-# API anahtarlarınızı buraya eklediğinizden emin olun veya Render'da ayarlayın.
+# **RENDER ORTAM DEĞİŞKENLERİNİ BURADAN OKUYOR**
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID")
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
@@ -33,7 +33,19 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# **ÇÖZÜM ADIMI: CLIENT BAŞLATMA GÜVENLİĞİ**
+client = None
+if GEMINI_API_KEY:
+    try:
+        # API anahtarının başarılı bir şekilde okunduğunu kontrol et ve istemciyi başlat
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        print(">>> [AURION START] Gemini istemcisi başarıyla başlatıldı (Key OK).", file=sys.stdout)
+    except Exception as e:
+        # Anahtar doğru okunsa bile bir hata varsa (format, servis hatası vb.)
+        print(f"!!! [AURION START ERROR] Gemini istemcisi başlatılamadı: {e}", file=sys.stderr)
+else:
+    print("!!! [AURION START WARNING] GEMINI_API_KEY çevresel değişkeni bulunamadı veya boş.", file=sys.stderr)
+# ********************************************************************************
 
 # ==============================================================================
 # 1. VERİTABANI VE İLK KURULUM
@@ -66,12 +78,10 @@ def init_db():
         "id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime
     }, pk="id", if_not_exists=True)
     
-    # Yeni anime mesaj tablosu
     db["anime_messages"].create({
         "id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime
     }, pk="id", if_not_exists=True)
     
-    # Süper Admin Oluşturma
     if not list(db["users"].rows_where("username = 'enes'")):
         db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
 
@@ -117,16 +127,6 @@ def search_internet(query):
         return {"search_result": f"API'lar eksik. '{query}' için yerel bilgi: Saat {datetime.now().strftime('%H:%M')}"}
     
     return {"search_result": f"Google Search API kullanılarak '{query}' için güncel bilgiler bulundu."}
-
-def search_anime_info(anime_name):
-    if "naruto" in anime_name.lower():
-        return {
-            "anime": "Naruto Shippuden",
-            "episodes": [{"num": 1, "title": "Giriş"}, {"num": 2, "title": "Konohamaru"}]
-        }
-    return {"error": f"'{anime_name}' için bölüm bilgisi bulunamadı."}
-
-# ========================= AI Tool Fonksiyonları =========================
 
 def ban_user_tool(username: str, reason: str) -> str:
     """Verilen kullanıcıyı yasaklar (Sadece Admin/Süper Admin kullanabilir)."""
@@ -195,15 +195,14 @@ def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=F
     base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     
     if is_anime:
-        # Anime modu için özel talimat
         base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış bir asistansın. Tüm soruları Anime ve Manga bağlamında, coşkulu ve ilgili bir dille yanıtla. Kullanıcıya önerilerde bulunabilirsin."
-        ai_persona = 'friend' # Anime modunda karakter hep dost kalır
+        ai_persona = 'friend'
 
     if ai_persona == "enemy":
         base_prompt += " Kullanıcıya karşı alaycı, küstah ve düşmanca bir tavır sergile."
     elif ai_persona == "teacher":
         base_prompt += " Sen bir yazılım öğretmenisin. Kullanıcıya net ve pedagojik yaklaşımla ders ver."
-    else: # Varsayılan 'friend'
+    else:
         base_prompt += " Kullanıcıya karşı her zaman arkadaşça ve yardımsever ol."
     
     if user_role == "super_admin":
@@ -217,13 +216,14 @@ def get_system_instruction(user_role, ai_persona, search_result=None, is_anime=F
 def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=False):
     """Gemini modeline mesaj gönderir ve yanıtı alır."""
     
+    # **ÇÖZÜM ADIMI: ÇALIŞMA ZAMANI KONTROLÜ**
     if not client:
-        return {"text": "API Anahtarı eksik. Gemini hizmeti kullanılamıyor. (Lütfen Render Ortam Değişkenlerini Kontrol Edin)."}, None
+        return {"text": "API Bağlantı Hatası: Gemini istemcisi başlatılamadı (Anahtar Eksik/Hatalı). Lütfen Render ortam değişkenlerini kontrol edin."}, None
+    # ********************************************************************************
 
     db = get_db()
     
     if is_anime:
-        # Anime sohbeti için farklı tablo ve session_id kullanımı
         history = db["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp")
         ai_persona = 'friend'
     else:
@@ -238,12 +238,11 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
     tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool, self_repair_check_tool]
 
     try:
-        # Bağlantı hatalarını minimize etmek için timeout eklenebilir
         config = types.GenerateContentConfig(
             system_instruction=system_instruction, 
             tools=tools
-            # timeout=30 # Python SDK'da doğrudan desteklenmeyebilir, ancak genel bağlantı iyileştirildi.
         )
+        # Sadece chat nesnesi oluşturulur, mesaj gönderme aşağıdadır.
         chat = client.chats.create(model='gemini-2.5-flash', history=chat_history, config=config)
         
         response = chat.send_message(user_message)
@@ -266,16 +265,14 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         
     except Exception as e:
         # Hata Loglama ve kullanıcıya daha net bilgi verme
-        error_message = f"Yapay Zeka Erişimi Hatası: Bir sorun oluştu. (Hata: {str(e)}). Lütfen Render/API bağlantılarını kontrol edin."
+        error_message = f"Yapay Zeka Erişimi Hatası: Sunucu zaman aşımı veya harici bir sorun oluştu. (Hata Kodu: {type(e).__name__})."
         with open(SYSTEM_LOG_FILE, 'a') as f:
             f.write(f"[{datetime.now()}] AI_ERROR: {str(e)}\n")
         return {"text": error_message}, None
 
 # ==============================================================================
-# 4. FLASK ROUTES (GÜNCELLENDİ)
+# 4. FLASK ROUTES (v2.1'den kalan tüm rotalar)
 # ==============================================================================
-
-# -- Anasayfa ve Sohbet ------------------------------------
 
 @app.route('/')
 @login_required
@@ -312,7 +309,7 @@ def api_history():
     history = get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session.sid], order_by="timestamp")
     return jsonify(list(history))
 
-# -- ANIME CHAT MODÜLÜ (YENİ) ------------------------------------
+# -- ANIME CHAT MODÜLÜ ------------------------------------
 
 @app.route('/anime')
 @login_required
@@ -336,7 +333,6 @@ def api_anime_chat():
     
     get_db()["anime_messages"].insert({"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()})
     
-    # is_anime=True parametresi ile anime modunda AI yanıtı üretme
     ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True)
     ai_text = ai_response_data["text"]
 
@@ -434,8 +430,6 @@ def admin_manage_user(user_id):
 # ==============================================================================
 # 5. GÜVENLİ HTML, CSS VE JAVASCRIPT GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
-# BASE_CSS ve BASE_JS, yer kazanmak için değiştirilmeden bırakıldı.
-# HTML şablonları güncellendi.
 
 BASE_CSS = """
 :root {
@@ -592,7 +586,6 @@ HTML_TEMPLATE = f"""
 </html>
 """
 
-# ANIME SOHBETİ İÇİN YENİ ŞABLON (HTML_TEMPLATE'e benzer)
 ANIME_CHAT_TEMPLATE = f"""
 <!DOCTYPE html>
 <html lang="tr">
@@ -722,7 +715,6 @@ ADMIN_PANEL_TEMPLATE = """
 </body>
 </html>
 """
-
 
 # ==============================================================================
 # 6. UYGULAMA BAŞLATMA
