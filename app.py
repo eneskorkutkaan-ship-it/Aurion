@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V10.8 (Tüm Hata Yamaları ve Zorunlu Arama)
+# AURION PROJESİ - V10.9 (Arama Motoru Nihai Düzeltme)
 # ==============================================================================
 
 import os
@@ -152,15 +152,18 @@ def search_internet(query: str) -> dict:
     # 🚨 KRİTİK LOGLAMA ADIMI
     print(f"*** [AURION SEARCH TRIGGERED] AI/Kullanıcı tarafından arama fonksiyonu çağrıldı. Sorgu: '{query}'", file=sys.stdout)
     
-    # 💥 API ANAHTAR KONTROLÜ VE HATA YAMASI
-    if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
+    # 💥 V10.9 GÜÇLENDİRİLMİŞ ANAHTAR KONTROLÜ
+    google_api_key = os.getenv("GOOGLE_SEARCH_API_KEY")
+    google_cx_id = os.getenv("GOOGLE_SEARCH_CX_ID")
+
+    if not google_api_key or not google_cx_id:
         error_msg = "GOOGLE API anahtarları eksik. İnternet araması devre dışı. Lütfen Render ortam değişkenlerini kontrol edin."
         print(f"!!! [SEARCH API ERROR] {error_msg}", file=sys.stderr)
-        return {"search_result": f"**[HATA]** {error_msg}"}
+        return {"search_result": f"**[HATA: Anahtar Kontrolü]** {error_msg}. Keyleriniz Render'dan okunmuyor. (Render Değişkenlerini Kontrol Edin)"}
     
     try:
-        service = build("customsearch", "v1", developerKey=GOOGLE_SEARCH_API_KEY)
-        res = service.cse().list(q=query, cx=GOOGLE_SEARCH_CX_ID, num=3).execute() 
+        service = build("customsearch", "v1", developerKey=google_api_key)
+        res = service.cse().list(q=query, cx=google_cx_id, num=3).execute() 
         
         search_results = []
         if 'items' in res:
@@ -182,10 +185,10 @@ def search_internet(query: str) -> dict:
 
     except Exception as e:
         error_type = type(e).__name__
-        # 💥 EN SIK KARŞILAŞILAN API HATASI YAMASI (403: Yetki/Kota, 400: Anahtar Hataları)
+        # 💥 API Hata Raporlamasını Güçlendirme
         error_msg = f"Google Arama API'sine erişim sağlanamadı. Hata Tipi: {error_type}. API Kısıtlamalarını veya Kotayı Kontrol Edin."
         print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
-        return {"search_result": f"**[HATA]** İnternet Arama Hatası: {error_msg}. Detay: {str(e)}"}
+        return {"search_result": f"**[HATA: API Erişim]** {error_msg}. Detay: **{str(e)}** (403/Kota Hatası Olabilir)."}
 
 # Diğer tool fonksiyonları aynı kalır...
 def ban_user_tool(username: str, reason: str) -> str:
@@ -230,7 +233,7 @@ def get_system_instruction(user_role, ai_persona, is_anime=False):
         base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'."
         ai_persona = 'friend'
         
-    # AI'ı aramaya zorlayan talimat, kullanıcı komutuyla çakışmaz, AI'ın da arama yapmasını sağlar.
+    # AI'ı aramaya zorlayan talimat
     base_prompt += " SANA SORULAN HERHANGİ BİR GÜNCEL KONU, HABER VEYA BİLİNEN FAKTİK BİLGİ DIŞINDAKİ HER SORU İÇİN **search_internet** ARACINI KESİNLİKLE KULLANMALISIN. Bu aracı kullanarak edindiğin bilgileri yanıtının başında belirt."
 
     if ai_persona == "enemy":
@@ -348,7 +351,7 @@ def api_chat():
     user_id = session['user_id']
     user = g.user 
     
-    # ⭐ V10.8 KRİTİK DÜZELTME: /SEARCH İLE ARAMAYI ZORLAMA
+    # ⭐ /SEARCH İLE ARAMAYI ZORLAMA
     if user_message.startswith('/'):
         command_match = re.match(r'/(\w+)\s*(.*)', user_message)
         if command_match:
@@ -364,7 +367,6 @@ def api_chat():
                 if len(parts) == 2: result = teach_software_tool(parts[0], parts[1])
                 else: result = "Hata: /teach komutu '/teach yazılım konu' formatında olmalıdır."
             
-            # 👇 /SEARCH İLE ARAMAYI ZORLAMA 👇
             elif command == 'search':
                 print(f"*** [AURION COMMAND] Kullanıcı zorunlu arama komutunu kullandı: {user_message}", file=sys.stdout)
                 if not args:
@@ -373,12 +375,10 @@ def api_chat():
                     search_result_dict = search_internet(args) 
                     
                     if 'search_result' in search_result_dict:
-                        # Yanıtı doğrudan arama sonucuyla oluştur
                         result = f"**[Kullanıcı Komutuyla Arama]**\n{search_result_dict['search_result']}"
                     else:
                          result = "Hata: Arama fonksiyonundan beklenmedik bir sonuç geldi."
-            # 👆 /SEARCH KOMUTU SONU 👆
-
+            
             elif command == 'ban' and user["role"] in ('admin', 'super_admin'):
                 parts = args.split(maxsplit=1)
                 if len(parts) == 2: result = ban_user_tool(parts[0], parts[1])
@@ -413,13 +413,139 @@ def api_chat():
     
     return jsonify({"success": True, "response": ai_text})
 
-# Diğer yollar (Routes) aynı kalır...
-# ... (admin, login, register, logout, anime_chat_page, api_anime_chat, api_anime_history, api_history, admin_ban_user)
+@app.route('/api/history', methods=['GET'])
+@login_required
+def api_history():
+    user_id = session['user_id']
+    session_id = session.get('current_chat_session') 
+    if not session_id: return jsonify([])
+    
+    history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
+    return jsonify(history)
+
+@app.route('/anime')
+@login_required
+@role_required('super_admin')
+def anime_chat_page():
+    user = g.user
+    return render_template_string(ANIME_CHAT_TEMPLATE, user=user)
+
+@app.route('/api/anime_chat', methods=['POST'])
+@login_required
+@role_required('super_admin')
+@limiter.limit("15 per minute")
+def api_anime_chat():
+    data = request.json
+    user_message = data.get('message', '').strip()
+    if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
+
+    user_id = session['user_id']
+    user = g.user
+    
+    ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True) 
+    ai_text = ai_response_data["text"]
+    
+    if "status" in ai_response_data:
+        return jsonify({"success": False, "message": ai_text}), ai_response_data["status"]
+    
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            db = get_db()
+            db["anime_messages"].insert_all([
+                {"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()},
+                {"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now() + timedelta(seconds=1)}
+            ], alter=True)
+            break 
+        except sqlite_utils.db.OperationalError: time.sleep(1)
+        except Exception: break
+            
+    return jsonify({"success": True, "response": ai_text})
+
+@app.route('/api/anime_history', methods=['GET'])
+@login_required
+@role_required('super_admin')
+def api_anime_history():
+    user_id = session['user_id']
+    history = list(get_db()["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
+    return jsonify(history)
+
+@app.route('/admin')
+@login_required
+@role_required('admin')
+def admin_panel():
+    db = get_db()
+    users = list(db["users"].rows_where(where="1", order_by="id"))
+    logs = list(db["admin_logs"].rows_where(where="1", order_by="-timestamp", limit=50))
+    user = g.user
+    return render_template_string(ADMIN_PANEL_TEMPLATE, user=user, users=users, logs=logs)
+
+@app.route('/admin/ban/<int:user_id>', methods=['POST'])
+@login_required
+@role_required('admin')
+def admin_ban_user(user_id):
+    db = get_db()
+    if user_id == session['user_id']: 
+        return redirect(url_for('admin_panel'))
+        
+    user_list = list(db["users"].rows_where("id = ?", [user_id]))
+    target_user = user_list[0] if user_list else None
+    
+    if target_user and target_user['role'] == 'super_admin':
+        return redirect(url_for('admin_panel'))
+        
+    if target_user:
+        db["users"].update(user_id, {"is_banned": True})
+        db["admin_logs"].insert({"admin_id": session.get('user_id'), "action": "Yasaklama", "target_username": target_user['username'], "timestamp": datetime.now()})
+        return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin_panel'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        user_list = list(get_db()["users"].rows_where("username = ?", [username]))
+        user = user_list[0] if user_list else None
+        
+        if user and check_password_hash(user['password_hash'], password):
+            if user['is_banned']:
+                return render_template_string(LOGIN_TEMPLATE, error="Hesabınız yasaklanmıştır.")
+            session['user_id'] = user['id']
+            session['username'] = user['username']
+            session['ai_persona'] = user['theme'] 
+            session['current_chat_session'] = str(uuid.uuid4())
+            return redirect(url_for('index'))
+        return render_template_string(LOGIN_TEMPLATE, error="Geçersiz kullanıcı adı veya şifre.")
+    
+    return render_template_string(LOGIN_TEMPLATE)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        db = get_db()
+        if list(db["users"].rows_where("username = ?", [username])):
+            return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten alınmış.")
+        
+        db["users"].insert({"username": username, "password_hash": generate_password_hash(password)}, alter=True)
+        return redirect(url_for('login', success="Kayıt başarılı. Lütfen giriş yapın."))
+
+    return render_template_string(REGISTER_TEMPLATE)
+
+@app.route('/logout')
+@login_required
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
 
 # ==============================================================================
 # 5. GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
-# (Tüm HTML ve CSS/JS şablonları V10.7'deki ile aynı kalır)
+
 BASE_CSS = """:root {
     --bg-dark: #121212;
     --text-dark: #E0E0E0;
@@ -611,259 +737,4 @@ LOGIN_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Giriş</title>
-    <style>""" + BASE_CSS + """ .container { max-width: 400px; margin: 100px auto; padding: 20px; background: #222; border-radius: 10px; } input[type=text], input[type=password] { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #555; border-radius: 4px; box-sizing: border-box; background: #333; color:white; } button { background-color: #007BFF; color: white; padding: 14px 20px; margin: 8px 0; border: none; border-radius: 4px; cursor: pointer; width: 100%; }</style>
-</head>
-<body class="dark">
-    <div class="container">
-        <h2 style="text-align:center; color:#007BFF;">AURION Giriş</h2>
-        {% if error %}<p style="color:red; text-align:center;">{{ error }}</p>{% endif %}
-        {% if success %}<p style="color:green; text-align:center;">{{ success }}</p>{% endif %}
-        <form method="POST">
-            <label for="username">Kullanıcı Adı</label>
-            <input type="text" id="username" name="username" required>
-            <label for="password">Şifre</label>
-            <input type="password" id="password" name="password" required>
-            <button type="submit">Giriş Yap</button>
-        </form>
-        <p style="text-align:center;"><a href="{{ url_for('register') }}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
-    </div>
-</body>
-</html>
-"""
-
-REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("url_for('register')", "url_for('login')").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
-
-
-ADMIN_PANEL_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="tr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aurion - Admin Paneli</title>
-    <style>""" + BASE_CSS + """
-        .content-container { padding: 20px; overflow-y: auto; }
-        .log-entry { font-size: 0.9em; padding: 5px 0; border-bottom: 1px solid #222; }
-    </style>
-</head>
-<body class="dark">
-    <div class="sidebar">
-        <h1 class="logo">Aurion</h1>
-        <hr style="border-color:#333;">
-        
-        <p>Hoş Geldiniz, <b>{{ user.username }}</b></p>
-        <p>Rol: <i>{{ user.role }}</i></p>
-        <a href="{{ url_for('logout') }}" style="color:var(--primary-color);">Çıkış Yap</a>
-        
-        <hr style="border-color:#333;">
-
-        <nav style="flex-grow:1;">
-            <a href="{{ url_for('index') }}" style="display:block; margin-bottom:10px; color:inherit; text-decoration:none;">💬 Sohbet</a>
-            <a href="{{ url_for('admin_panel') }}" class="admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">🛡️ Admin Paneli</a>
-            {% if user.role == "super_admin" %}
-            <a href="{{ url_for('anime_chat_page') }}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime Sohbeti</a>
-            {% endif %}
-        </nav>
-    </div>
-
-    <div class="content-container">
-        <h2 style="color:var(--admin-color);">🛡️ Admin Paneli</h2>
-
-        <div style="margin-bottom: 30px;">
-            <h3>Kullanıcı Yönetimi</h3>
-            
-            <table>
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Kullanıcı Adı</th>
-                        <th>Rol</th>
-                        <th>Durum</th>
-                        <th>Eylem</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for u in users %}
-                    <tr>
-                        <td>{{ u.id }}</td>
-                        <td>{{ u.username }}</td>
-                        <td style="color:{% if u.role == 'super_admin' %}var(--super-admin-color){% elif u.role == 'admin' %}var(--admin-color){% else %}inherit{% endif %};">
-                            {{ u.role }}
-                        </td>
-                        <td style="color:{% if u.is_banned %}red{% else %}green{% endif %};">
-                            {% if u.is_banned %}Yasaklı{% else %}Aktif{% endif %}
-                        </td>
-                        <td>
-                            {% if u.role != 'super_admin' and u.id != user.id %}
-                                {% if not u.is_banned %}
-                                <form method="POST" action="{{ url_for('admin_ban_user', user_id=u.id) }}" style="display:inline;">
-                                    <button type="submit" class="ban-btn">Yasakla</button>
-                                </form>
-                                {% else %}
-                                <form method="POST" action="#" style="display:inline;"> 
-                                    <button type="submit" class="ban-btn" disabled style="background:#555;">Yasak Kaldır</button> 
-                                </form>
-                                {% endif %}
-                            {% else %}
-                                -
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-
-        <div>
-            <h3>Yönetici Kayıtları (Son 50)</h3>
-            {% for log in logs %}
-                <div class="log-entry" style="color:{% if 'Yasaklama' in log.action %}#dc3545{% else %}#007BFF{% endif %};">
-                    [{{ log.timestamp }}] **{{ log.action }}** işlemi, {{ log.target_username }} kullanıcısını hedef aldı.
-                </div>
-            {% endfor %}
-        </div>
-    </div>
-</body>
-</html>
-"""
-
-# ... (Kalan yollar ve şablonlar eklenecek) ...
-@app.route('/api/history', methods=['GET'])
-@login_required
-def api_history():
-    user_id = session['user_id']
-    session_id = session.get('current_chat_session') 
-    if not session_id: return jsonify([])
-    
-    history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
-    return jsonify(history)
-
-@app.route('/anime')
-@login_required
-@role_required('super_admin')
-def anime_chat_page():
-    user = g.user
-    return render_template_string(ANIME_CHAT_TEMPLATE, user=user)
-
-@app.route('/api/anime_chat', methods=['POST'])
-@login_required
-@role_required('super_admin')
-@limiter.limit("15 per minute")
-def api_anime_chat():
-    data = request.json
-    user_message = data.get('message', '').strip()
-    if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
-
-    user_id = session['user_id']
-    user = g.user
-    
-    ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True) 
-    ai_text = ai_response_data["text"]
-    
-    if "status" in ai_response_data:
-        return jsonify({"success": False, "message": ai_text}), ai_response_data["status"]
-    
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            db = get_db()
-            db["anime_messages"].insert_all([
-                {"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()},
-                {"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now() + timedelta(seconds=1)}
-            ], alter=True)
-            break 
-        except sqlite_utils.db.OperationalError: time.sleep(1)
-        except Exception: break
-            
-    return jsonify({"success": True, "response": ai_text})
-
-@app.route('/api/anime_history', methods=['GET'])
-@login_required
-@role_required('super_admin')
-def api_anime_history():
-    user_id = session['user_id']
-    history = list(get_db()["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
-    return jsonify(history)
-
-@app.route('/admin')
-@login_required
-@role_required('admin')
-def admin_panel():
-    db = get_db()
-    users = list(db["users"].rows_where(where="1", order_by="id"))
-    logs = list(db["admin_logs"].rows_where(where="1", order_by="-timestamp", limit=50))
-    user = g.user
-    return render_template_string(ADMIN_PANEL_TEMPLATE, user=user, users=users, logs=logs)
-
-@app.route('/admin/ban/<int:user_id>', methods=['POST'])
-@login_required
-@role_required('admin')
-def admin_ban_user(user_id):
-    db = get_db()
-    if user_id == session['user_id']: 
-        return redirect(url_for('admin_panel'))
-        
-    user_list = list(db["users"].rows_where("id = ?", [user_id]))
-    target_user = user_list[0] if user_list else None
-    
-    if target_user and target_user['role'] == 'super_admin':
-        return redirect(url_for('admin_panel'))
-        
-    if target_user:
-        db["users"].update(user_id, {"is_banned": True})
-        db["admin_logs"].insert({"admin_id": session.get('user_id'), "action": "Yasaklama", "target_username": target_user['username'], "timestamp": datetime.now()})
-        return redirect(url_for('admin_panel'))
-    return redirect(url_for('admin_panel'))
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        user_list = list(get_db()["users"].rows_where("username = ?", [username]))
-        user = user_list[0] if user_list else None
-        
-        if user and check_password_hash(user['password_hash'], password):
-            if user['is_banned']:
-                return render_template_string(LOGIN_TEMPLATE, error="Hesabınız yasaklanmıştır.")
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['ai_persona'] = user['theme'] 
-            session['current_chat_session'] = str(uuid.uuid4())
-            return redirect(url_for('index'))
-        return render_template_string(LOGIN_TEMPLATE, error="Geçersiz kullanıcı adı veya şifre.")
-    
-    return render_template_string(LOGIN_TEMPLATE)
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        db = get_db()
-        if list(db["users"].rows_where("username = ?", [username])):
-            return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten alınmış.")
-        
-        # Kullanıcı başarıyla eklendikten sonra login sayfasına yönlendirme.
-        db["users"].insert({"username": username, "password_hash": generate_password_hash(password)}, alter=True)
-        return redirect(url_for('login', success="Kayıt başarılı. Lütfen giriş yapın."))
-
-    return render_template_string(REGISTER_TEMPLATE)
-
-@app.route('/logout')
-@login_required
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-# ==============================================================================
-# 6. UYGULAMA BAŞLATMA
-# ==============================================================================
-
-if __name__ == '__main__':
-    try:
-        app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000), debug=True)
-    except Exception as e:
-        print(f"!!! [AURION INIT ERROR] Uygulama başlatılamadı: {str(e)}", file=sys.stderr)
+    <style>""" + BASE_CSS + """ .container { max-width: 400px; margin: 100px auto; padding: 20px; background: #222; border-radius: 10px; } input[type=text], input[type=password] { width: 100%; padding: 10px; margin
