@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V10.5 (Tüm Hata Düzeltmeleri ve Arama Motoru Entegrasyonu)
+# AURION PROJESİ - V10.7 (Tüm Hata Düzeltmeleri ve Zorunlu Arama Komutu)
 # ==============================================================================
 
 import os
@@ -45,7 +45,7 @@ if GEMINI_API_KEY:
         print(f"!!! [AURION START CRITICAL] Gemini istemcisi başlatılamadı: {type(e).__name__} - {e}", file=sys.stderr)
 
 # ==============================================================================
-# 1. VERİTABANI VE HATA ÇÖZÜMÜ (KRİTİK DÜZELTME)
+# 1. VERİTABANI VE HATA ÇÖZÜMÜ
 # ==============================================================================
 
 def get_db(max_retries=5, delay=1):
@@ -71,7 +71,6 @@ def close_db(e=None):
     db = g.pop('db', None)
     if db is not None:
         try:
-            # Sadece conn özelliği varsa kapat
             if hasattr(db, 'conn') and db.conn: 
                 db.conn.close() 
             else:
@@ -92,7 +91,6 @@ def init_db():
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
     except Exception as e:
         print(f"!!! [DB INIT ERROR] Veri tabanı başlatma hatası: {str(e)}", file=sys.stderr)
-        # Hata durumunda uygulama çıkış yapmalı ki Render hatayı yakalasın
         sys.exit(1) 
 
 with app.app_context():
@@ -101,12 +99,11 @@ with app.app_context():
 limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"], storage_uri="memory://")
 
 # ==============================================================================
-# 2. YETKİLENDİRME VE ÖN İŞLEMLER (Aynı)
+# 2. YETKİLENDİRME VE ÖN İŞLEMLER
 # ==============================================================================
 
 def login_required(f):
     def wrap(*args, **kwargs):
-        # g.user kontrolü eklenerek kullanıcı silinirse Session'ın çalışması engellenir
         if 'user_id' not in session or not g.user: return redirect(url_for('login'))
         return f(*args, **kwargs)
     wrap.__name__ = f.__name__
@@ -137,7 +134,6 @@ def make_session_permanent_and_assign_id():
     g.user = None
     if 'user_id' in session:
         try:
-            # DB hatası almamak için get_db() kullanılır
             user_data = get_db()["users"].get(session['user_id']) 
             if user_data:
                 g.user = user_data
@@ -147,13 +143,16 @@ def make_session_permanent_and_assign_id():
             session.pop('username', None)
 
 # ==============================================================================
-# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI (Arama motoru bildirimi eklendi)
+# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI
 # ==============================================================================
 
 def search_internet(query: str) -> dict:
     """
     Belirtilen sorgu için Google Custom Search API'si üzerinden internette arama yapar.
     """
+    # 🚨 KRİTİK LOGLAMA ADIMI
+    print(f"*** [AURION SEARCH TRIGGERED] AI/Kullanıcı tarafından arama fonksiyonu çağrıldı. Sorgu: '{query}'", file=sys.stdout)
+    
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
         error_msg = "GOOGLE API anahtarları eksik. İnternet araması devre dışı."
         print(f"!!! [SEARCH API ERROR] {error_msg}", file=sys.stderr)
@@ -161,7 +160,8 @@ def search_internet(query: str) -> dict:
     
     try:
         service = build("customsearch", "v1", developerKey=GOOGLE_SEARCH_API_KEY)
-        res = service.cse().list(q=query, cx=GOOGLE_SEARCH_CX_ID, num=5).execute() 
+        # Sadece 3 sonuç alarak kotayı azaltabiliriz.
+        res = service.cse().list(q=query, cx=GOOGLE_SEARCH_CX_ID, num=3).execute() 
         
         search_results = []
         if 'items' in res:
@@ -173,10 +173,11 @@ def search_internet(query: str) -> dict:
                 })
         
         if search_results:
-            result_text = "**[Arama Yapıldı]** Bulunan Güncel Bilgiler:\n"
+            result_text = "**[Arama Yapıldı]** Güncel Bilgiler:\n"
             for r in search_results:
                 snippet = r['snippet'].replace('\n', ' ').strip()
-                result_text += f"- **{r['title']}** ({r['source']}): {snippet[:150]}...\n"
+                # 200 karakterle sınırlama
+                result_text += f"- **{r['title']}** ({r['source']}): {snippet[:200]}...\n" 
             return {"search_result": result_text}
             
         return {"search_result": f"**[Arama Yapıldı]** '{query}' sorgusu için güncel bilgi bulunamadı."}
@@ -187,8 +188,8 @@ def search_internet(query: str) -> dict:
         print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
         return {"search_result": f"**[HATA]** İnternet Arama Hatası: {error_msg}"}
 
+# Diğer tool fonksiyonları aynı kalır...
 def ban_user_tool(username: str, reason: str) -> str:
-    # ... (Aynı kalır)
     db = get_db()
     user_list = list(db["users"].rows_where("username = ?", [username]))
     user = user_list[0] if user_list else None
@@ -201,7 +202,6 @@ def ban_user_tool(username: str, reason: str) -> str:
     return f"Hata: '{username}' adında bir kullanıcı bulunamadı."
 
 def clear_chat_tool(session_id: str) -> str:
-    # ... (Aynı kalır)
     db = get_db()
     user_id = session.get('user_id')
     deleted_count = db["messages"].delete_where("user_id = ? AND session_id = ?", [user_id, session_id])
@@ -211,31 +211,27 @@ def clear_chat_tool(session_id: str) -> str:
     return "Hata: Geçmiş temizlenemedi veya zaten boştu."
 
 def change_ai_mode_tool(mode: str) -> str:
-    # ... (Aynı kalır)
     valid_modes = ["friend", "enemy", "teacher"]
     mode = mode.lower()
     if mode in valid_modes:
         session['ai_persona'] = mode
-        # Temanın da güncellenmesi sağlanır
         get_db()["users"].update(session.get('user_id'), {"theme": mode})
         return f"Yapay Zeka modu başarıyla **{mode.capitalize()}** olarak değiştirildi."
     return f"Hata: Geçersiz mod '{mode}'. Geçerli modlar: {', '.join(valid_modes)}"
 
 def teach_software_tool(software_name: str, topic: str) -> str:
-    # ... (Aynı kalır)
     if session.get('ai_persona') != 'teacher':
         return f"Hata: Bu komut sadece Öğretmen modundayken çalışır. Şu anki modunuz: {session.get('ai_persona')}."
     return f"Öğretmen modundasınız. Yapay Zekadan lütfen '{software_name}' yazılımı hakkında '{topic}' konusunu en iyi şekilde anlatmasını isteyin. Ders başlatılıyor..."
 
 def get_system_instruction(user_role, ai_persona, is_anime=False):
-    # Sistem talimatı V10.3'teki agresif arama talimatı ile aynıdır.
     base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     
     if is_anime:
         base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'."
         ai_persona = 'friend'
         
-    # KRİTİK DEĞİŞİKLİK: AI'ın Arama Aracını KULLANMASINI İSTEME
+    # AI'ı aramaya zorlayan talimat, kullanıcı komutuyla çakışmaz, AI'ın da arama yapmasını sağlar.
     base_prompt += " SANA SORULAN HERHANGİ BİR GÜNCEL KONU, HABER VEYA BİLİNEN FAKTİK BİLGİ DIŞINDAKİ HER SORU İÇİN **search_internet** ARACINI KESİNLİKLE KULLANMALISIN. Bu aracı kullanarak edindiğin bilgileri yanıtının başında belirt."
 
     if ai_persona == "enemy":
@@ -273,7 +269,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         
         system_instruction = get_system_instruction(user_role, ai_persona, is_anime=is_anime)
         
-        # TÜM ARAÇLAR BURADA TANIMLANIYOR 
         tools = [search_internet, ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool]
 
         config = types.GenerateContentConfig(system_instruction=system_instruction, tools=tools)
@@ -287,7 +282,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             config=config,
         )
 
-        # ⚙️ TOOL KULLANIMI KONTROLÜ
+        # ⚙️ TOOL KULLANIMI KONTROLÜ (AI'ın kendi inisiyatifiyle tool çağırması)
         if response.function_calls:
             function_call = response.function_calls[0]
             function_name = function_call.name
@@ -300,7 +295,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
                 if function_name == 'ban_user_tool' and user_role not in ('admin', 'super_admin'):
                     tool_result_content = {"result": "Hata: Bu araç sadece Admin ve Süper Adminler tarafından kullanılabilir."}
                 else:
-                    # Aracı çalıştır ve sonucu al
                     tool_result_dict = tool_func(**function_args)
                     tool_result_content = {"result": tool_result_dict.get('search_result') if function_name == 'search_internet' else tool_result_dict}
                 
@@ -315,10 +309,9 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
                     config=config
                 )
                 
-                # ⭐ KRİTİK DEĞİŞİKLİK: Arama Sonucunu Yanıtın Başına Ekle ⭐
+                # Arama Sonucunu Yanıtın Başına Ekle
                 final_text = response.text
                 if function_name == 'search_internet' and 'search_result' in tool_result_dict:
-                    # AI'ın yanıtının önüne, arama sonucunun bildirimini ekliyoruz.
                     final_text = tool_result_dict['search_result'] + "\n\n" + final_text
                 
                 return {"text": final_text}, response
@@ -336,7 +329,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
 
 
 # ==============================================================================
-# 4. FLASK ROUTES (Aynı)
+# 4. FLASK ROUTES
 # ==============================================================================
 
 @app.route('/')
@@ -358,27 +351,46 @@ def api_chat():
     user_id = session['user_id']
     user = g.user 
     
-    # Yerel Komut İşleme
+    # ⭐ V10.7 KRİTİK DEĞİŞİKLİK: YEREL KOMUT İŞLEME VE /SEARCH EKLEME
     if user_message.startswith('/'):
         command_match = re.match(r'/(\w+)\s*(.*)', user_message)
         if command_match:
             command = command_match.group(1).lower()
             args = command_match.group(2).strip()
 
-            if command == 'mode': result = change_ai_mode_tool(args)
-            elif command == 'clear': result = clear_chat_tool(session_id)
+            if command == 'mode': 
+                result = change_ai_mode_tool(args)
+            elif command == 'clear': 
+                result = clear_chat_tool(session_id)
             elif command == 'teach':
                 parts = args.split(maxsplit=1)
                 if len(parts) == 2: result = teach_software_tool(parts[0], parts[1])
                 else: result = "Hata: /teach komutu '/teach yazılım konu' formatında olmalıdır."
+            
+            # 👇 YENİ KOMUT: /SEARCH İLE ARAMAYI ZORLAMA 👇
+            elif command == 'search':
+                if not args:
+                    result = "Hata: /search komutu '/search [sorgu]' formatında olmalıdır."
+                else:
+                    search_result_dict = search_internet(args) # search_internet fonksiyonunu direkt çağır
+                    
+                    if 'search_result' in search_result_dict:
+                        # Yanıtı doğrudan arama sonucuyla oluştur
+                        result = f"**[Kullanıcı Komutuyla Arama]**\n{search_result_dict['search_result']}"
+                    else:
+                         result = "Hata: Arama fonksiyonundan beklenmedik bir sonuç geldi."
+            # 👆 YENİ KOMUT SONU 👆
+
             elif command == 'ban' and user["role"] in ('admin', 'super_admin'):
                 parts = args.split(maxsplit=1)
                 if len(parts) == 2: result = ban_user_tool(parts[0], parts[1])
                 else: result = "Hata: /ban komutu '/ban kullanıcı_adı sebep' formatında olmalıdır."
             elif command == 'ban':
                  result = "Hata: Bu komutu kullanmak için Admin veya Süper Admin yetkisine sahip olmalısınız."
-            else: result = f"Bilinmeyen komut: /{command}. Kullanılabilecek komutlar: /mode, /clear, /teach."
+            else: 
+                result = f"Bilinmeyen komut: /{command}. Kullanılabilecek komutlar: /mode, /clear, /teach, **/__search__**."
             
+            # Komut yanıtını kullanıcıya gönder
             return jsonify({"success": True, "response": f"**[KOMUT YANITI]**\n{result}"})
             
     # AI yanıtı oluştur
@@ -521,6 +533,7 @@ def register():
         if list(db["users"].rows_where("username = ?", [username])):
             return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten alınmış.")
         
+        # Kullanıcı başarıyla eklendikten sonra login sayfasına yönlendirme.
         db["users"].insert({"username": username, "password_hash": generate_password_hash(password)}, alter=True)
         return redirect(url_for('login', success="Kayıt başarılı. Lütfen giriş yapın."))
 
@@ -706,7 +719,7 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="input-area">
-            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/mode enemy, /clear, /ban)">
+            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)">
             <button onclick="sendMessage(false)">Gönder</button>
         </div>
     </div>
@@ -717,7 +730,7 @@ HTML_TEMPLATE = """
 """
 
 ANIME_CHAT_TEMPLATE = HTML_TEMPLATE.replace('Aurion - Gelişmiş Yapay Zeka', 'Aurion - Anime Sohbeti').replace(
-    'placeholder="Aurion\'a bir şey sor veya komut gir (/mode enemy, /clear, /ban)">', 
+    'placeholder="Aurion\'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)">', 
     'placeholder="Anime Aurion\'a bir anime/manga sorusu sor.">'
 )
 
@@ -734,6 +747,7 @@ LOGIN_TEMPLATE = """
     <div class="container">
         <h2 style="text-align:center; color:#007BFF;">AURION Giriş</h2>
         {% if error %}<p style="color:red; text-align:center;">{{ error }}</p>{% endif %}
+        {% if success %}<p style="color:green; text-align:center;">{{ success }}</p>{% endif %}
         <form method="POST">
             <label for="username">Kullanıcı Adı</label>
             <input type="text" id="username" name="username" required>
