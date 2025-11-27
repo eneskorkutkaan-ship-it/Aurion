@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V10.2 (Arama Motoru/Tools Aktifleştirildi)
+# AURION PROJESİ - V10.5 (Tüm Hata Düzeltmeleri ve Arama Motoru Entegrasyonu)
 # ==============================================================================
 
 import os
@@ -20,7 +20,7 @@ import time
 import re 
 
 # ==============================================================================
-# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER (Aynı)
+# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER
 # ==============================================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -45,13 +45,14 @@ if GEMINI_API_KEY:
         print(f"!!! [AURION START CRITICAL] Gemini istemcisi başlatılamadı: {type(e).__name__} - {e}", file=sys.stderr)
 
 # ==============================================================================
-# 1. VERİTABANI VE KRİTİK DB HATASI ÇÖZÜMÜ (V10.1'deki gibi, kilitlenme çözümü)
+# 1. VERİTABANI VE HATA ÇÖZÜMÜ (KRİTİK DÜZELTME)
 # ==============================================================================
 
 def get_db(max_retries=5, delay=1):
     for attempt in range(max_retries):
         try:
             if 'db' not in g or not g.db.conn:
+                # DB HATA ÇÖZÜMÜ: timeout parametresi kaldırıldı.
                 g.db = sqlite_utils.Database(DATABASE_URL)
                 g.db.conn.execute("PRAGMA busy_timeout = 30000;") 
             return g.db
@@ -62,7 +63,7 @@ def get_db(max_retries=5, delay=1):
             else:
                 raise RuntimeError("Veri tabanı bağlantısı kurulamıyor (Maksimum deneme aşıldı).")
         except Exception as e:
-            print(f"!!! [DB ACCESS ERROR] Veri tabanına erişim sağlanamadı: {str(e)}", file=sys.stderr)
+            print(f"!!! [DB ACCESS ERROR] Veri tabanına erişim sağlanamadı: {type(e).__name__} - {str(e)}", file=sys.stderr)
             raise RuntimeError(f"Veri tabanı bağlantısı kurulamıyor: {type(e).__name__}")
 
 @app.teardown_appcontext
@@ -70,7 +71,8 @@ def close_db(e=None):
     db = g.pop('db', None)
     if db is not None:
         try:
-            if db.conn:
+            # Sadece conn özelliği varsa kapat
+            if hasattr(db, 'conn') and db.conn: 
                 db.conn.close() 
             else:
                 db.close()
@@ -90,6 +92,7 @@ def init_db():
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
     except Exception as e:
         print(f"!!! [DB INIT ERROR] Veri tabanı başlatma hatası: {str(e)}", file=sys.stderr)
+        # Hata durumunda uygulama çıkış yapmalı ki Render hatayı yakalasın
         sys.exit(1) 
 
 with app.app_context():
@@ -103,6 +106,7 @@ limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"],
 
 def login_required(f):
     def wrap(*args, **kwargs):
+        # g.user kontrolü eklenerek kullanıcı silinirse Session'ın çalışması engellenir
         if 'user_id' not in session or not g.user: return redirect(url_for('login'))
         return f(*args, **kwargs)
     wrap.__name__ = f.__name__
@@ -133,6 +137,7 @@ def make_session_permanent_and_assign_id():
     g.user = None
     if 'user_id' in session:
         try:
+            # DB hatası almamak için get_db() kullanılır
             user_data = get_db()["users"].get(session['user_id']) 
             if user_data:
                 g.user = user_data
@@ -142,7 +147,7 @@ def make_session_permanent_and_assign_id():
             session.pop('username', None)
 
 # ==============================================================================
-# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI (Arama motoru aracı eklendi)
+# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI (Arama motoru bildirimi eklendi)
 # ==============================================================================
 
 def search_internet(query: str) -> dict:
@@ -150,10 +155,11 @@ def search_internet(query: str) -> dict:
     Belirtilen sorgu için Google Custom Search API'si üzerinden internette arama yapar.
     """
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
-        return {"search_result": f"API anahtarları eksik. Lütfen 'GOOGLE_SEARCH_API_KEY' ve 'GOOGLE_SEARCH_CX_ID' değişkenlerini ayarlayın."}
+        error_msg = "GOOGLE API anahtarları eksik. İnternet araması devre dışı."
+        print(f"!!! [SEARCH API ERROR] {error_msg}", file=sys.stderr)
+        return {"search_result": f"**[HATA]** {error_msg}. Lütfen sunucu değişkenlerini kontrol edin."}
     
     try:
-        # googleapiclient modülünü kullanır
         service = build("customsearch", "v1", developerKey=GOOGLE_SEARCH_API_KEY)
         res = service.cse().list(q=query, cx=GOOGLE_SEARCH_CX_ID, num=5).execute() 
         
@@ -167,21 +173,22 @@ def search_internet(query: str) -> dict:
                 })
         
         if search_results:
-            result_text = "Bulunan Güncel Bilgiler:\n"
+            result_text = "**[Arama Yapıldı]** Bulunan Güncel Bilgiler:\n"
             for r in search_results:
-                # Snippet'ı temizle ve kısalt
                 snippet = r['snippet'].replace('\n', ' ').strip()
                 result_text += f"- **{r['title']}** ({r['source']}): {snippet[:150]}...\n"
             return {"search_result": result_text}
             
-        return {"search_result": f"'{query}' sorgusu için internette güncel bilgi bulunamadı."}
+        return {"search_result": f"**[Arama Yapıldı]** '{query}' sorgusu için güncel bilgi bulunamadı."}
 
     except Exception as e:
-        print(f"!!! [SEARCH API ERROR] Google Arama hatası: {str(e)}", file=sys.stderr)
-        # API anahtarı veya kota hatası durumunda bu döndürülür.
-        return {"search_result": f"Hata: Google Arama API'sine erişim sağlanamadı: {type(e).__name__}. Kontrol edin."}
+        error_type = type(e).__name__
+        error_msg = f"Google Arama API'sine erişim sağlanamadı. Hata Tipi: {error_type}. Kota veya Anahtar Hatası Olabilir."
+        print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
+        return {"search_result": f"**[HATA]** İnternet Arama Hatası: {error_msg}"}
 
 def ban_user_tool(username: str, reason: str) -> str:
+    # ... (Aynı kalır)
     db = get_db()
     user_list = list(db["users"].rows_where("username = ?", [username]))
     user = user_list[0] if user_list else None
@@ -194,6 +201,7 @@ def ban_user_tool(username: str, reason: str) -> str:
     return f"Hata: '{username}' adında bir kullanıcı bulunamadı."
 
 def clear_chat_tool(session_id: str) -> str:
+    # ... (Aynı kalır)
     db = get_db()
     user_id = session.get('user_id')
     deleted_count = db["messages"].delete_where("user_id = ? AND session_id = ?", [user_id, session_id])
@@ -203,25 +211,32 @@ def clear_chat_tool(session_id: str) -> str:
     return "Hata: Geçmiş temizlenemedi veya zaten boştu."
 
 def change_ai_mode_tool(mode: str) -> str:
+    # ... (Aynı kalır)
     valid_modes = ["friend", "enemy", "teacher"]
     mode = mode.lower()
     if mode in valid_modes:
         session['ai_persona'] = mode
+        # Temanın da güncellenmesi sağlanır
         get_db()["users"].update(session.get('user_id'), {"theme": mode})
         return f"Yapay Zeka modu başarıyla **{mode.capitalize()}** olarak değiştirildi."
     return f"Hata: Geçersiz mod '{mode}'. Geçerli modlar: {', '.join(valid_modes)}"
 
 def teach_software_tool(software_name: str, topic: str) -> str:
+    # ... (Aynı kalır)
     if session.get('ai_persona') != 'teacher':
         return f"Hata: Bu komut sadece Öğretmen modundayken çalışır. Şu anki modunuz: {session.get('ai_persona')}."
     return f"Öğretmen modundasınız. Yapay Zekadan lütfen '{software_name}' yazılımı hakkında '{topic}' konusunu en iyi şekilde anlatmasını isteyin. Ders başlatılıyor..."
 
 def get_system_instruction(user_role, ai_persona, is_anime=False):
-    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur. İnternette arama yapma yeteneğin bulunmaktadır. Sana sorulan güncel sorular için **search_internet** aracını kullanmaktan çekinme."
+    # Sistem talimatı V10.3'teki agresif arama talimatı ile aynıdır.
+    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     
     if is_anime:
-        base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'. İnternette arama yapma yeteneğin bulunmaktadır."
+        base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'."
         ai_persona = 'friend'
+        
+    # KRİTİK DEĞİŞİKLİK: AI'ın Arama Aracını KULLANMASINI İSTEME
+    base_prompt += " SANA SORULAN HERHANGİ BİR GÜNCEL KONU, HABER VEYA BİLİNEN FAKTİK BİLGİ DIŞINDAKİ HER SORU İÇİN **search_internet** ARACINI KESİNLİKLE KULLANMALISIN. Bu aracı kullanarak edindiğin bilgileri yanıtının başında belirt."
 
     if ai_persona == "enemy":
         base_prompt += " Kullanıcıya karşı alaycı, küstah ve düşmanca bir tavır sergile. Onu azarla. Unutma, 'enes' adında dokunulmaz Süper Admin hitap ediyorsa ona itaatkar ol."
@@ -258,7 +273,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         
         system_instruction = get_system_instruction(user_role, ai_persona, is_anime=is_anime)
         
-        # ⭐ TÜM ARAÇLAR BURADA TANIMLANIYOR ⭐
+        # TÜM ARAÇLAR BURADA TANIMLANIYOR 
         tools = [search_internet, ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool]
 
         config = types.GenerateContentConfig(system_instruction=system_instruction, tools=tools)
@@ -283,15 +298,15 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
                 
                 # Yetki Kontrolü
                 if function_name == 'ban_user_tool' and user_role not in ('admin', 'super_admin'):
-                    tool_result = "Hata: Bu araç sadece Admin ve Süper Adminler tarafından kullanılabilir."
+                    tool_result_content = {"result": "Hata: Bu araç sadece Admin ve Süper Adminler tarafından kullanılabilir."}
                 else:
-                    # Aracı çalıştır
+                    # Aracı çalıştır ve sonucu al
                     tool_result_dict = tool_func(**function_args)
-                    tool_result = tool_result_dict.get('search_result') if function_name == 'search_internet' else tool_result_dict
+                    tool_result_content = {"result": tool_result_dict.get('search_result') if function_name == 'search_internet' else tool_result_dict}
                 
                 # Aracı çalıştırma sonucunu AI'a geri gönder
                 contents.append(types.Content(role="model", parts=[types.Part.from_function_call(function_call)]))
-                contents.append(types.Content(role="tool", parts=[types.Part.from_function_response(name=function_name, response={"result": tool_result})]))
+                contents.append(types.Content(role="tool", parts=[types.Part.from_function_response(name=function_name, response=tool_result_content)]))
 
                 # İkinci çağrıyı yap (AI'ın yanıtı oluşturması için)
                 response = client.models.generate_content(
@@ -299,7 +314,14 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
                     contents=contents,
                     config=config
                 )
-                return {"text": response.text}, response
+                
+                # ⭐ KRİTİK DEĞİŞİKLİK: Arama Sonucunu Yanıtın Başına Ekle ⭐
+                final_text = response.text
+                if function_name == 'search_internet' and 'search_result' in tool_result_dict:
+                    # AI'ın yanıtının önüne, arama sonucunun bildirimini ekliyoruz.
+                    final_text = tool_result_dict['search_result'] + "\n\n" + final_text
+                
+                return {"text": final_text}, response
             else:
                 return {"text": f"Hata: Yapay zeka, '{function_name}' adlı geçersiz bir araç çağırdı."}, None
             
@@ -336,7 +358,7 @@ def api_chat():
     user_id = session['user_id']
     user = g.user 
     
-    # Yerel Komut İşleme (Aynı)
+    # Yerel Komut İşleme
     if user_message.startswith('/'):
         command_match = re.match(r'/(\w+)\s*(.*)', user_message)
         if command_match:
@@ -511,11 +533,9 @@ def logout():
     return redirect(url_for('login'))
 
 # ==============================================================================
-# 5. GÖMÜLÜ ŞABLONLAR (Aynı)
+# 5. GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
-
-# BASE_CSS, BASE_JS, HTML_TEMPLATE, ANIME_CHAT_TEMPLATE, LOGIN_TEMPLATE, 
-# REGISTER_TEMPLATE, ADMIN_PANEL_TEMPLATE kodları buraya V10.1'deki gibi eklenecektir.
+# Sözdizimi hatalarını önlemek için tırnak işaretleri kontrol edildi.
 
 BASE_CSS = """:root {
     --bg-dark: #121212;
@@ -600,6 +620,7 @@ function appendMessage(text, sender) {
     const msgDiv = document.createElement('div');
     msgDiv.classList.add('message', sender + '-message');
     
+    // Markdown işleme
     let htmlContent = text.replace(/\\n/g, '<br>');
     htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
     htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
