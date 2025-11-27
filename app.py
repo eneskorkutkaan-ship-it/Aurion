@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V10.9 (Arama Motoru Nihai Düzeltme)
+# AURION PROJESİ - V11.0 (Tüm Yamalar + Sohbet Kutusu Düzeltmesi)
 # ==============================================================================
 
 import os
@@ -13,6 +13,7 @@ from flask_limiter.util import get_remote_address
 from google import genai
 from google.genai import types
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError # API Hata Yönetimi için eklendi
 import json
 import sys
 import uuid
@@ -53,6 +54,7 @@ def get_db(max_retries=5, delay=1):
         try:
             if 'db' not in g or not g.db.conn:
                 g.db = sqlite_utils.Database(DATABASE_URL)
+                # DB kilitlenme yaması
                 g.db.conn.execute("PRAGMA busy_timeout = 30000;") 
             return g.db
         except sqlite_utils.db.OperationalError as e:
@@ -86,6 +88,7 @@ def init_db():
         db["anime_messages"].create({"id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         
         if not list(db["users"].rows_where("username = 'enes'")):
+            # Başlangıç super_admin kullanıcısı (Yama: Kullanıcı adı/şifre her zaman aynı)
             db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
     except Exception as e:
@@ -148,18 +151,17 @@ def make_session_permanent_and_assign_id():
 def search_internet(query: str) -> dict:
     """
     Belirtilen sorgu için Google Custom Search API'si üzerinden internette arama yapar.
+    (V10.9 Yama: Anahtar Okuma Kontrolü ve Detaylı Hata Raporlama eklendi)
     """
-    # 🚨 KRİTİK LOGLAMA ADIMI
     print(f"*** [AURION SEARCH TRIGGERED] AI/Kullanıcı tarafından arama fonksiyonu çağrıldı. Sorgu: '{query}'", file=sys.stdout)
     
-    # 💥 V10.9 GÜÇLENDİRİLMİŞ ANAHTAR KONTROLÜ
     google_api_key = os.getenv("GOOGLE_SEARCH_API_KEY")
     google_cx_id = os.getenv("GOOGLE_SEARCH_CX_ID")
 
     if not google_api_key or not google_cx_id:
-        error_msg = "GOOGLE API anahtarları eksik. İnternet araması devre dışı. Lütfen Render ortam değişkenlerini kontrol edin."
+        error_msg = "GOOGLE API anahtarları eksik. İnternet araması devre dışı."
         print(f"!!! [SEARCH API ERROR] {error_msg}", file=sys.stderr)
-        return {"search_result": f"**[HATA: Anahtar Kontrolü]** {error_msg}. Keyleriniz Render'dan okunmuyor. (Render Değişkenlerini Kontrol Edin)"}
+        return {"search_result": f"**[HATA: Anahtar Kontrolü]** {error_msg}. Keyleriniz Render'dan okunmuyor. Lütfen değişken isimlerini kontrol edin."}
     
     try:
         service = build("customsearch", "v1", developerKey=google_api_key)
@@ -183,15 +185,21 @@ def search_internet(query: str) -> dict:
             
         return {"search_result": f"**[Arama Yapıldı]** '{query}' sorgusu için güncel bilgi bulunamadı."}
 
+    except HttpError as e:
+        error_type = type(e).__name__
+        # HttpError (403/429) için özel raporlama
+        error_msg = f"Google Arama API'sine erişim sağlanamadı. Hata Kodu: {e.resp.status}. Kotayı/Kısıtlamaları Kontrol Edin."
+        print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
+        return {"search_result": f"**[HATA: API Erişim]** {error_msg}. Detay: **{str(e)}**"}
+        
     except Exception as e:
         error_type = type(e).__name__
-        # 💥 API Hata Raporlamasını Güçlendirme
-        error_msg = f"Google Arama API'sine erişim sağlanamadı. Hata Tipi: {error_type}. API Kısıtlamalarını veya Kotayı Kontrol Edin."
+        error_msg = f"Google Arama API'sine beklenmedik erişim hatası. Hata Tipi: {error_type}."
         print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
-        return {"search_result": f"**[HATA: API Erişim]** {error_msg}. Detay: **{str(e)}** (403/Kota Hatası Olabilir)."}
+        return {"search_result": f"**[HATA: API Erişim]** {error_msg}. Detay: {str(e)}."}
 
-# Diğer tool fonksiyonları aynı kalır...
 def ban_user_tool(username: str, reason: str) -> str:
+    # Admin yetkisine sahip kullanıcıyı yasaklar.
     db = get_db()
     user_list = list(db["users"].rows_where("username = ?", [username]))
     user = user_list[0] if user_list else None
@@ -204,15 +212,17 @@ def ban_user_tool(username: str, reason: str) -> str:
     return f"Hata: '{username}' adında bir kullanıcı bulunamadı."
 
 def clear_chat_tool(session_id: str) -> str:
+    # Mevcut sohbet geçmişini temizler.
     db = get_db()
     user_id = session.get('user_id')
     deleted_count = db["messages"].delete_where("user_id = ? AND session_id = ?", [user_id, session_id])
-    session['current_chat_session'] = str(uuid.uuid4())
+    session['current_chat_session'] = str(uuid.uuid4()) # Yeni oturum başlat
     if deleted_count > 0:
         return f"Sohbet geçmişi (Session ID: {session_id[:8]}) başarılı bir şekilde temizlendi. Yeni bir sohbet oturumu başlatıldı."
     return "Hata: Geçmiş temizlenemedi veya zaten boştu."
 
 def change_ai_mode_tool(mode: str) -> str:
+    # AI kişiliğini değiştirir.
     valid_modes = ["friend", "enemy", "teacher"]
     mode = mode.lower()
     if mode in valid_modes:
@@ -222,11 +232,13 @@ def change_ai_mode_tool(mode: str) -> str:
     return f"Hata: Geçersiz mod '{mode}'. Geçerli modlar: {', '.join(valid_modes)}"
 
 def teach_software_tool(software_name: str, topic: str) -> str:
+    # Öğretmen modunda ders başlatır.
     if session.get('ai_persona') != 'teacher':
         return f"Hata: Bu komut sadece Öğretmen modundayken çalışır. Şu anki modunuz: {session.get('ai_persona')}."
     return f"Öğretmen modundasınız. Yapay Zekadan lütfen '{software_name}' yazılımı hakkında '{topic}' konusunu en iyi şekilde anlatmasını isteyin. Ders başlatılıyor..."
 
 def get_system_instruction(user_role, ai_persona, is_anime=False):
+    # AI'ın sistem talimatlarını oluşturur.
     base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     
     if is_anime:
@@ -249,6 +261,7 @@ def get_system_instruction(user_role, ai_persona, is_anime=False):
     return base_prompt
 
 def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=False):
+    # Gemini modelinden yanıt üretir (Tool/Araç kullanım yaması dahil)
     if not client: return {"text": "API Bağlantı Hatası: Gemini istemcisi başlatılamadı (Anahtar Eksik/Hatalı).", "status": 503}, None
     try:
         db = get_db()
@@ -284,7 +297,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             config=config,
         )
 
-        # ⚙️ TOOL KULLANIMI KONTROLÜ (AI'ın kendi inisiyatifiyle tool çağırması)
+        # ⚙️ TOOL KULLANIMI KONTROLÜ
         if response.function_calls:
             function_call = response.function_calls[0]
             function_name = function_call.name
@@ -311,7 +324,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
                 
                 final_text = response.text
                 if function_name == 'search_internet' and 'search_result' in tool_result_dict:
-                    # Arama sonucunu yanıtın başına ekle (sadece başarılı tool çağrısı sonucu)
+                    # Arama sonucunu yanıta ekle
                     final_text = tool_result_dict['search_result'] + "\n\n" + final_text
                 
                 return {"text": final_text}, response
@@ -351,7 +364,7 @@ def api_chat():
     user_id = session['user_id']
     user = g.user 
     
-    # ⭐ /SEARCH İLE ARAMAYI ZORLAMA
+    # ⭐ /SEARCH KOMUTU YAMASI
     if user_message.startswith('/'):
         command_match = re.match(r'/(\w+)\s*(.*)', user_message)
         if command_match:
@@ -388,7 +401,6 @@ def api_chat():
             else: 
                 result = f"Bilinmeyen komut: /{command}. Kullanılabilecek komutlar: /mode, /clear, /teach, **/__search__**."
             
-            # Komut yanıtını kullanıcıya gönder
             return jsonify({"success": True, "response": f"**[KOMUT YANITI]**\n{result}"})
             
     # AI yanıtı oluştur
@@ -543,8 +555,10 @@ def logout():
     return redirect(url_for('login'))
 
 # ==============================================================================
-# 5. GÖMÜLÜ ŞABLONLAR
+# 5. GÖMÜLÜ ŞABLONLAR (UI Düzeltmesi burada)
 # ==============================================================================
+
+# **Sohbet kutusunun görünmeme ihtimaline karşı CSS ve HTML yapısı güçlendirildi.**
 
 BASE_CSS = """:root {
     --bg-dark: #121212;
@@ -554,26 +568,94 @@ BASE_CSS = """:root {
     --admin-color: #FFA500;
     --super-admin-color: #FFD700;
 }
-body, html { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; height: 100vh; overflow: hidden; }
-body.dark { background-color: var(--bg-dark); color: var(--text-dark); }
-.sidebar {
-    width: var(--sidebar-width); padding: 20px; background: #1f1f1f; color: var(--text-dark);
-    box-shadow: 2px 0 5px rgba(0,0,0,0.3); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
+body, html { 
+    margin: 0; 
+    padding: 0; 
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+    display: flex; 
+    height: 100vh; 
+    overflow: hidden; 
 }
-.chat-container, .content-container { flex-grow: 1; display: flex; flex-direction: column; }
-.messages { flex-grow: 1; overflow-y: auto; padding: 20px; }
-.message { margin-bottom: 15px; padding: 10px 15px; border-radius: 18px; max-width: 75%; line-height: 1.5; }
-.user-message { background: var(--primary-color); color: white; margin-left: auto; border-bottom-right-radius: 4px; }
-.ai-message { background: #333; color: white; margin-right: auto; border-bottom-left-radius: 4px; }
+body.dark { 
+    background-color: var(--bg-dark); 
+    color: var(--text-dark); 
+}
+.sidebar {
+    width: var(--sidebar-width); 
+    padding: 20px; 
+    background: #1f1f1f; 
+    color: var(--text-dark);
+    box-shadow: 2px 0 5px rgba(0,0,0,0.3); 
+    display: flex; 
+    flex-direction: column; 
+    flex-shrink: 0; 
+    overflow-y: auto;
+}
+.chat-container, .content-container { 
+    flex-grow: 1; 
+    display: flex; 
+    flex-direction: column; 
+    /* DİKEY FLEX KONTROLÜ */
+    min-height: 0; 
+}
+.messages { 
+    flex-grow: 1; 
+    overflow-y: auto; 
+    padding: 20px; 
+    /* Mesajların alt kısma itilmesi için önemli */
+    display: flex; 
+    flex-direction: column; 
+}
+.message { 
+    margin-bottom: 15px; 
+    padding: 10px 15px; 
+    border-radius: 18px; 
+    max-width: 75%; 
+    line-height: 1.5; 
+    word-wrap: break-word; /* Uzun kelime/link kırılması */
+}
+.user-message { 
+    background: var(--primary-color); 
+    color: white; 
+    margin-left: auto; 
+    border-bottom-right-radius: 4px; 
+}
+.ai-message { 
+    background: #333; 
+    color: white; 
+    margin-right: auto; 
+    border-bottom-left-radius: 4px; 
+}
 .input-area {
-    height: 70px; background: #1f1f1f; padding: 10px 20px; box-shadow: 0 -2px 5px rgba(0,0,0,0.3); z-index: 1000;
-    display: flex; align-items: center;
+    /* Sohbet kutusu görünürlük düzeltmesi */
+    height: 70px; 
+    min-height: 70px; /* Sabit yükseklik */
+    background: #1f1f1f; 
+    padding: 10px 20px; 
+    box-shadow: 0 -2px 5px rgba(0,0,0,0.3); 
+    z-index: 1000;
+    display: flex; 
+    align-items: center;
 }
 .input-area input {
-    flex-grow: 1; padding: 15px; border-radius: 25px; border: 1px solid #555;
-    background: #222; color: white; font-size: 16px; box-sizing: border-box; margin-right: 10px;
+    flex-grow: 1; 
+    padding: 15px; 
+    border-radius: 25px; 
+    border: 1px solid #555;
+    background: #222; 
+    color: white; 
+    font-size: 16px; 
+    box-sizing: border-box; 
+    margin-right: 10px;
 }
-.input-area button { padding: 10px 20px; background: var(--primary-color); color: white; border: none; border-radius: 25px; cursor: pointer; }
+.input-area button { 
+    padding: 10px 20px; 
+    background: var(--primary-color); 
+    color: white; 
+    border: none; 
+    border-radius: 25px; 
+    cursor: pointer; 
+}
 h1.logo { color: var(--primary-color); }
 .super-admin-link { color: var(--super-admin-color) !important; }
 .admin-link { color: var(--admin-color) !important; }
@@ -713,12 +795,12 @@ HTML_TEMPLATE = """
     <div class="chat-container">
         <div class="messages" id="messages">
         </div>
-
+        
         <div class="input-area">
             <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)">
             <button onclick="sendMessage(false)">Gönder</button>
         </div>
-    </div>
+        </div>
 
     <script>""" + BASE_JS + """</script>
 </body>
@@ -737,4 +819,128 @@ LOGIN_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Giriş</title>
-    <style>""" + BASE_CSS + """ .container { max-width: 400px; margin: 100px auto; padding: 20px; background: #222; border-radius: 10px; } input[type=text], input[type=password] { width: 100%; padding: 10px; margin"""
+    <style>""" + BASE_CSS + """ .container { max-width: 400px; margin: 100px auto; padding: 20px; background: #222; border-radius: 10px; } input[type=text], input[type=password] { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #555; border-radius: 4px; box-sizing: border-box; background: #333; color:white; } button { background-color: #007BFF; color: white; padding: 14px 20px; margin: 8px 0; border: none; border-radius: 4px; cursor: pointer; width: 100%; }</style>
+</head>
+<body class="dark">
+    <div class="container">
+        <h2 style="text-align:center; color:#007BFF;">AURION Giriş</h2>
+        {% if error %}<p style="color:red; text-align:center;">{{ error }}</p>{% endif %}
+        {% if success %}<p style="color:green; text-align:center;">{{ success }}</p>{% endif %}
+        <form method="POST">
+            <label for="username">Kullanıcı Adı</label>
+            <input type="text" id="username" name="username" required>
+            <label for="password">Şifre</label>
+            <input type="password" id="password" name="password" required>
+            <button type="submit">Giriş Yap</button>
+        </form>
+        <p style="text-align:center;"><a href="{{ url_for('register') }}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
+    </div>
+</body>
+</html>
+"""
+
+REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("url_for('register')", "url_for('login')").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
+
+
+ADMIN_PANEL_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aurion - Admin Paneli</title>
+    <style>""" + BASE_CSS + """
+        .content-container { padding: 20px; overflow-y: auto; }
+        .log-entry { font-size: 0.9em; padding: 5px 0; border-bottom: 1px solid #222; }
+    </style>
+</head>
+<body class="dark">
+    <div class="sidebar">
+        <h1 class="logo">Aurion</h1>
+        <hr style="border-color:#333;">
+        
+        <p>Hoş Geldiniz, <b>{{ user.username }}</b></p>
+        <p>Rol: <i>{{ user.role }}</i></p>
+        <a href="{{ url_for('logout') }}" style="color:var(--primary-color);">Çıkış Yap</a>
+        
+        <hr style="border-color:#333;">
+
+        <nav style="flex-grow:1;">
+            <a href="{{ url_for('index') }}" style="display:block; margin-bottom:10px; color:inherit; text-decoration:none;">💬 Sohbet</a>
+            <a href="{{ url_for('admin_panel') }}" class="admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">🛡️ Admin Paneli</a>
+            {% if user.role == "super_admin" %}
+            <a href="{{ url_for('anime_chat_page') }}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime Sohbeti</a>
+            {% endif %}
+        </nav>
+    </div>
+
+    <div class="content-container">
+        <h2 style="color:var(--admin-color);">🛡️ Admin Paneli</h2>
+
+        <div style="margin-bottom: 30px;">
+            <h3>Kullanıcı Yönetimi</h3>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Kullanıcı Adı</th>
+                        <th>Rol</th>
+                        <th>Durum</th>
+                        <th>Eylem</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for u in users %}
+                    <tr>
+                        <td>{{ u.id }}</td>
+                        <td>{{ u.username }}</td>
+                        <td style="color:{% if u.role == 'super_admin' %}var(--super-admin-color){% elif u.role == 'admin' %}var(--admin-color){% else %}inherit{% endif %};">
+                            {{ u.role }}
+                        </td>
+                        <td style="color:{% if u.is_banned %}red{% else %}green{% endif %};">
+                            {% if u.is_banned %}Yasaklı{% else %}Aktif{% endif %}
+                        </td>
+                        <td>
+                            {% if u.role != 'super_admin' and u.id != user.id %}
+                                {% if not u.is_banned %}
+                                <form method="POST" action="{{ url_for('admin_ban_user', user_id=u.id) }}" style="display:inline;">
+                                    <button type="submit" class="ban-btn">Yasakla</button>
+                                </form>
+                                {% else %}
+                                <form method="POST" action="#" style="display:inline;"> 
+                                    <button type="submit" class="ban-btn" disabled style="background:#555;">Yasak Kaldır</button> 
+                                </form>
+                                {% endif %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div>
+            <h3>Yönetici Kayıtları (Son 50)</h3>
+            {% for log in logs %}
+                <div class="log-entry" style="color:{% if 'Yasaklama' in log.action %}#dc3545{% else %}#007BFF{% endif %};">
+                    [{{ log.timestamp }}] **{{ log.action }}** işlemi, {{ log.target_username }} kullanıcısını hedef aldı.
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+# ==============================================================================
+# 6. UYGULAMA BAŞLATMA
+# ==============================================================================
+
+if __name__ == '__main__':
+    try:
+        app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000), debug=True)
+    except Exception as e:
+        print(f"!!! [AURION INIT ERROR] Uygulama başlatılamadı: {str(e)}", file=sys.stderr)
