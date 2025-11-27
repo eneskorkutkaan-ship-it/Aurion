@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V11.0 (Tüm Yamalar + Sohbet Kutusu Düzeltmesi)
+# AURION PROJESİ - V12.0 (Nihai HTML Gömme ve Tüm Yamalar)
 # ==============================================================================
 
 import os
@@ -13,7 +13,7 @@ from flask_limiter.util import get_remote_address
 from google import genai
 from google.genai import types
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError # API Hata Yönetimi için eklendi
+from googleapiclient.errors import HttpError 
 import json
 import sys
 import uuid
@@ -88,7 +88,6 @@ def init_db():
         db["anime_messages"].create({"id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
         
         if not list(db["users"].rows_where("username = 'enes'")):
-            # Başlangıç super_admin kullanıcısı (Yama: Kullanıcı adı/şifre her zaman aynı)
             db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
         print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
     except Exception as e:
@@ -187,7 +186,6 @@ def search_internet(query: str) -> dict:
 
     except HttpError as e:
         error_type = type(e).__name__
-        # HttpError (403/429) için özel raporlama
         error_msg = f"Google Arama API'sine erişim sağlanamadı. Hata Kodu: {e.resp.status}. Kotayı/Kısıtlamaları Kontrol Edin."
         print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
         return {"search_result": f"**[HATA: API Erişim]** {error_msg}. Detay: **{str(e)}**"}
@@ -199,7 +197,6 @@ def search_internet(query: str) -> dict:
         return {"search_result": f"**[HATA: API Erişim]** {error_msg}. Detay: {str(e)}."}
 
 def ban_user_tool(username: str, reason: str) -> str:
-    # Admin yetkisine sahip kullanıcıyı yasaklar.
     db = get_db()
     user_list = list(db["users"].rows_where("username = ?", [username]))
     user = user_list[0] if user_list else None
@@ -212,17 +209,15 @@ def ban_user_tool(username: str, reason: str) -> str:
     return f"Hata: '{username}' adında bir kullanıcı bulunamadı."
 
 def clear_chat_tool(session_id: str) -> str:
-    # Mevcut sohbet geçmişini temizler.
     db = get_db()
     user_id = session.get('user_id')
     deleted_count = db["messages"].delete_where("user_id = ? AND session_id = ?", [user_id, session_id])
-    session['current_chat_session'] = str(uuid.uuid4()) # Yeni oturum başlat
+    session['current_chat_session'] = str(uuid.uuid4())
     if deleted_count > 0:
         return f"Sohbet geçmişi (Session ID: {session_id[:8]}) başarılı bir şekilde temizlendi. Yeni bir sohbet oturumu başlatıldı."
     return "Hata: Geçmiş temizlenemedi veya zaten boştu."
 
 def change_ai_mode_tool(mode: str) -> str:
-    # AI kişiliğini değiştirir.
     valid_modes = ["friend", "enemy", "teacher"]
     mode = mode.lower()
     if mode in valid_modes:
@@ -232,20 +227,17 @@ def change_ai_mode_tool(mode: str) -> str:
     return f"Hata: Geçersiz mod '{mode}'. Geçerli modlar: {', '.join(valid_modes)}"
 
 def teach_software_tool(software_name: str, topic: str) -> str:
-    # Öğretmen modunda ders başlatır.
     if session.get('ai_persona') != 'teacher':
         return f"Hata: Bu komut sadece Öğretmen modundayken çalışır. Şu anki modunuz: {session.get('ai_persona')}."
     return f"Öğretmen modundasınız. Yapay Zekadan lütfen '{software_name}' yazılımı hakkında '{topic}' konusunu en iyi şekilde anlatmasını isteyin. Ders başlatılıyor..."
 
 def get_system_instruction(user_role, ai_persona, is_anime=False):
-    # AI'ın sistem talimatlarını oluşturur.
     base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
     
     if is_anime:
         base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'."
         ai_persona = 'friend'
         
-    # AI'ı aramaya zorlayan talimat
     base_prompt += " SANA SORULAN HERHANGİ BİR GÜNCEL KONU, HABER VEYA BİLİNEN FAKTİK BİLGİ DIŞINDAKİ HER SORU İÇİN **search_internet** ARACINI KESİNLİKLE KULLANMALISIN. Bu aracı kullanarak edindiğin bilgileri yanıtının başında belirt."
 
     if ai_persona == "enemy":
@@ -261,12 +253,10 @@ def get_system_instruction(user_role, ai_persona, is_anime=False):
     return base_prompt
 
 def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=False):
-    # Gemini modelinden yanıt üretir (Tool/Araç kullanım yaması dahil)
     if not client: return {"text": "API Bağlantı Hatası: Gemini istemcisi başlatılamadı (Anahtar Eksik/Hatalı).", "status": 503}, None
     try:
         db = get_db()
         
-        # Geçmişi yükle
         if is_anime:
             history = list(db["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
             ai_persona = 'friend'
@@ -297,7 +287,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             config=config,
         )
 
-        # ⚙️ TOOL KULLANIMI KONTROLÜ
         if response.function_calls:
             function_call = response.function_calls[0]
             function_name = function_call.name
@@ -306,7 +295,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             if function_name in globals() and function_name.endswith('_tool') or function_name == 'search_internet':
                 tool_func = globals()[function_name]
                 
-                # Yetki Kontrolü
                 if function_name == 'ban_user_tool' and user_role not in ('admin', 'super_admin'):
                     tool_result_content = {"result": "Hata: Bu araç sadece Admin ve Süper Adminler tarafından kullanılabilir."}
                 else:
@@ -324,7 +312,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
                 
                 final_text = response.text
                 if function_name == 'search_internet' and 'search_result' in tool_result_dict:
-                    # Arama sonucunu yanıta ekle
                     final_text = tool_result_dict['search_result'] + "\n\n" + final_text
                 
                 return {"text": final_text}, response
@@ -349,6 +336,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
 @login_required
 def index():
     user = g.user
+    # Ana sayfa için HTML_TEMPLATE'i çağır
     return render_template_string(HTML_TEMPLATE, user=user)
 
 @app.route('/api/chat', methods=['POST'])
@@ -440,6 +428,7 @@ def api_history():
 @role_required('super_admin')
 def anime_chat_page():
     user = g.user
+    # Anime sayfası için ANIME_CHAT_TEMPLATE'i çağır
     return render_template_string(ANIME_CHAT_TEMPLATE, user=user)
 
 @app.route('/api/anime_chat', methods=['POST'])
@@ -490,6 +479,7 @@ def admin_panel():
     users = list(db["users"].rows_where(where="1", order_by="id"))
     logs = list(db["admin_logs"].rows_where(where="1", order_by="-timestamp", limit=50))
     user = g.user
+    # Admin sayfası için ADMIN_PANEL_TEMPLATE'i çağır
     return render_template_string(ADMIN_PANEL_TEMPLATE, user=user, users=users, logs=logs)
 
 @app.route('/admin/ban/<int:user_id>', methods=['POST'])
@@ -555,208 +545,10 @@ def logout():
     return redirect(url_for('login'))
 
 # ==============================================================================
-# 5. GÖMÜLÜ ŞABLONLAR (UI Düzeltmesi burada)
+# 5. GÖMÜLÜ ŞABLONLAR (V12.0: Tek Parça Şablonlar)
 # ==============================================================================
 
-# **Sohbet kutusunun görünmeme ihtimaline karşı CSS ve HTML yapısı güçlendirildi.**
-
-BASE_CSS = """:root {
-    --bg-dark: #121212;
-    --text-dark: #E0E0E0;
-    --primary-color: #007BFF;
-    --sidebar-width: 200px;
-    --admin-color: #FFA500;
-    --super-admin-color: #FFD700;
-}
-body, html { 
-    margin: 0; 
-    padding: 0; 
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-    display: flex; 
-    height: 100vh; 
-    overflow: hidden; 
-}
-body.dark { 
-    background-color: var(--bg-dark); 
-    color: var(--text-dark); 
-}
-.sidebar {
-    width: var(--sidebar-width); 
-    padding: 20px; 
-    background: #1f1f1f; 
-    color: var(--text-dark);
-    box-shadow: 2px 0 5px rgba(0,0,0,0.3); 
-    display: flex; 
-    flex-direction: column; 
-    flex-shrink: 0; 
-    overflow-y: auto;
-}
-.chat-container, .content-container { 
-    flex-grow: 1; 
-    display: flex; 
-    flex-direction: column; 
-    /* DİKEY FLEX KONTROLÜ */
-    min-height: 0; 
-}
-.messages { 
-    flex-grow: 1; 
-    overflow-y: auto; 
-    padding: 20px; 
-    /* Mesajların alt kısma itilmesi için önemli */
-    display: flex; 
-    flex-direction: column; 
-}
-.message { 
-    margin-bottom: 15px; 
-    padding: 10px 15px; 
-    border-radius: 18px; 
-    max-width: 75%; 
-    line-height: 1.5; 
-    word-wrap: break-word; /* Uzun kelime/link kırılması */
-}
-.user-message { 
-    background: var(--primary-color); 
-    color: white; 
-    margin-left: auto; 
-    border-bottom-right-radius: 4px; 
-}
-.ai-message { 
-    background: #333; 
-    color: white; 
-    margin-right: auto; 
-    border-bottom-left-radius: 4px; 
-}
-.input-area {
-    /* Sohbet kutusu görünürlük düzeltmesi */
-    height: 70px; 
-    min-height: 70px; /* Sabit yükseklik */
-    background: #1f1f1f; 
-    padding: 10px 20px; 
-    box-shadow: 0 -2px 5px rgba(0,0,0,0.3); 
-    z-index: 1000;
-    display: flex; 
-    align-items: center;
-}
-.input-area input {
-    flex-grow: 1; 
-    padding: 15px; 
-    border-radius: 25px; 
-    border: 1px solid #555;
-    background: #222; 
-    color: white; 
-    font-size: 16px; 
-    box-sizing: border-box; 
-    margin-right: 10px;
-}
-.input-area button { 
-    padding: 10px 20px; 
-    background: var(--primary-color); 
-    color: white; 
-    border: none; 
-    border-radius: 25px; 
-    cursor: pointer; 
-}
-h1.logo { color: var(--primary-color); }
-.super-admin-link { color: var(--super-admin-color) !important; }
-.admin-link { color: var(--admin-color) !important; }
-pre { background: #000; padding: 10px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
-table { width: 100%; border-collapse: collapse; margin-top: 15px; } th, td { padding: 10px; border: 1px solid #333; text-align: left; } th { background: #333; color: white; }
-.ban-btn { background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 5px; cursor: pointer; }
-"""
-
-BASE_JS = """
-function sendMessage(isAnime = false) {
-    const inputId = isAnime ? 'anime-message-input' : 'message-input';
-    const apiRoute = isAnime ? '/api/anime_chat' : '/api/chat';
-    
-    const input = document.getElementById(inputId);
-    const message = input.value.trim();
-    if (message === '') return;
-
-    appendMessage(message, 'user');
-    input.value = '';
-
-    fetch(apiRoute, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message: message})
-    })
-    .then(response => {
-        if (!response.ok) {
-            return response.json().then(errorData => {
-                throw new Error(errorData.message || 'Sunucudan başarısız yanıt alındı. HTTP Durum Kodu: ' + response.status);
-            }).catch(e => {
-                throw new Error('Sunucudan HTTP ' + response.status + ' hatası döndü.');
-            });
-        }
-        return response.json();
-    })
-    .then(data => {
-        if (data.success) {
-            appendMessage(data.response, 'ai');
-        } else {
-            appendMessage('Hata: ' + (data.message || 'Yapay Zeka Erişim Hatası oluştu. Lütfen logları kontrol edin.'), 'ai');
-        }
-    })
-    .catch(error => {
-        console.error('API İstemci Hatası:', error);
-        appendMessage('Bağlantı Hatası oluştu (İstemci Tarafı). Sunucu yanıt veremedi. Detay: ' + error.message, 'ai');
-    });
-}
-
-function appendMessage(text, sender) {
-    const messagesDiv = document.getElementById('messages');
-    if (!messagesDiv) return;
-
-    const msgDiv = document.createElement('div');
-    msgDiv.classList.add('message', sender + '-message');
-    
-    // Markdown işleme
-    let htmlContent = text.replace(/\\n/g, '<br>');
-    htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
-    htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
-    
-    msgDiv.innerHTML = htmlContent;
-    messagesDiv.appendChild(msgDiv);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-    const pathname = window.location.pathname;
-    const isAnimePage = pathname === '/anime';
-    const isMainChat = pathname === '/';
-    
-    let inputId = null;
-    let historyRoute = null;
-
-    if (isAnimePage) {
-        inputId = 'anime-message-input';
-        historyRoute = '/api/anime_history';
-    } else if (isMainChat) {
-        inputId = 'message-input';
-        historyRoute = '/api/history';
-    }
-
-    if (inputId) {
-        const input = document.getElementById(inputId);
-        if (input) {
-            input.addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') {
-                    sendMessage(isAnimePage);
-                }
-            });
-        }
-    }
-
-    if (historyRoute) {
-        fetch(historyRoute).then(res => res.json()).then(history => {
-            history.forEach(msg => {
-                appendMessage(msg.content, msg.role); 
-            });
-        }).catch(err => console.error("Geçmiş yüklenemedi:", err));
-    }
-});
-"""
+# **CSS, JS ve HTML tek bir şablonda birleştirildi. Bu, Flask'ın hepsini tek bir string olarak işlemesini garanti eder.**
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -765,7 +557,71 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Gelişmiş Yapay Zeka</title>
-    <style>""" + BASE_CSS + """</style>
+    <style>
+        :root {
+            --bg-dark: #121212;
+            --text-dark: #E0E0E0;
+            --primary-color: #007BFF;
+            --sidebar-width: 200px;
+            --admin-color: #FFA500;
+            --super-admin-color: #FFD700;
+        }
+        body, html { 
+            margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            display: flex; height: 100vh; overflow: hidden; 
+        }
+        body.dark { 
+            background-color: var(--bg-dark); 
+            color: var(--text-dark); 
+        }
+        .sidebar {
+            width: var(--sidebar-width); padding: 20px; background: #1f1f1f; color: var(--text-dark);
+            box-shadow: 2px 0 5px rgba(0,0,0,0.3); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
+        }
+        .chat-container { 
+            flex-grow: 1; 
+            display: flex; 
+            flex-direction: column; 
+            min-height: 0; /* Flexbox düzeltmesi */
+        }
+        .messages { 
+            flex-grow: 1; 
+            overflow-y: auto; 
+            padding: 20px; 
+        }
+        .message { 
+            margin-bottom: 15px; padding: 10px 15px; border-radius: 18px; max-width: 75%; line-height: 1.5; 
+            word-wrap: break-word;
+        }
+        .user-message { 
+            background: var(--primary-color); color: white; margin-left: auto; border-bottom-right-radius: 4px; 
+        }
+        .ai-message { 
+            background: #333; color: white; margin-right: auto; border-bottom-left-radius: 4px; 
+        }
+        .input-area {
+            /* Sohbet kutusu görünürlük düzeltmesi */
+            height: 70px; 
+            min-height: 70px; 
+            background: #1f1f1f; 
+            padding: 10px 20px; 
+            box-shadow: 0 -2px 5px rgba(0,0,0,0.3); 
+            z-index: 1000;
+            display: flex; 
+            align-items: center;
+        }
+        .input-area input {
+            flex-grow: 1; padding: 15px; border-radius: 25px; border: 1px solid #555;
+            background: #222; color: white; font-size: 16px; box-sizing: border-box; margin-right: 10px;
+        }
+        .input-area button { 
+            padding: 10px 20px; background: var(--primary-color); color: white; border: none; border-radius: 25px; cursor: pointer; 
+        }
+        h1.logo { color: var(--primary-color); }
+        .super-admin-link { color: var(--super-admin-color) !important; }
+        .admin-link { color: var(--admin-color) !important; }
+        pre { background: #000; padding: 10px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+    </style>
 </head>
 <body class="dark">
     <div class="sidebar">
@@ -802,15 +658,107 @@ HTML_TEMPLATE = """
         </div>
         </div>
 
-    <script>""" + BASE_JS + """</script>
+    <script>
+        function sendMessage(isAnime = false) {
+            const inputId = isAnime ? 'anime-message-input' : 'message-input';
+            const apiRoute = isAnime ? '{{ url_for("api_anime_chat") }}' : '{{ url_for("api_chat") }}';
+            
+            const input = document.getElementById(inputId);
+            const message = input.value.trim();
+            if (message === '') return;
+
+            appendMessage(message, 'user');
+            input.value = '';
+
+            fetch(apiRoute, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({message: message})
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(errorData => {
+                        throw new Error(errorData.message || 'Sunucudan başarısız yanıt alındı. HTTP Durum Kodu: ' + response.status);
+                    }).catch(e => {
+                        throw new Error('Sunucudan HTTP ' + response.status + ' hatası döndü.');
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    appendMessage(data.response, 'ai');
+                } else {
+                    appendMessage('Hata: ' + (data.message || 'Yapay Zeka Erişim Hatası oluştu. Lütfen logları kontrol edin.'), 'ai');
+                }
+            })
+            .catch(error => {
+                console.error('API İstemci Hatası:', error);
+                appendMessage('Bağlantı Hatası oluştu (İstemci Tarafı). Sunucu yanıt veremedi. Detay: ' + error.message, 'ai');
+            });
+        }
+
+        function appendMessage(text, sender) {
+            const messagesDiv = document.getElementById('messages');
+            if (!messagesDiv) return;
+
+            const msgDiv = document.createElement('div');
+            msgDiv.classList.add('message', sender + '-message');
+            
+            // Markdown işleme
+            let htmlContent = text.replace(/\\n/g, '<br>');
+            htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
+            htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
+            
+            msgDiv.innerHTML = htmlContent;
+            messagesDiv.appendChild(msgDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const pathname = window.location.pathname;
+            const isAnimePage = pathname === '/anime';
+            const isMainChat = pathname === '/';
+            
+            let inputId = null;
+            let historyRoute = null;
+
+            if (isAnimePage) {
+                inputId = 'anime-message-input';
+                historyRoute = '{{ url_for("api_anime_history") }}';
+            } else if (isMainChat) {
+                inputId = 'message-input';
+                historyRoute = '{{ url_for("api_history") }}';
+            }
+
+            if (inputId) {
+                const input = document.getElementById(inputId);
+                if (input) {
+                    input.addEventListener('keypress', function(e) {
+                        if (e.key === 'Enter') {
+                            sendMessage(isAnimePage);
+                        }
+                    });
+                }
+            }
+
+            if (historyRoute) {
+                fetch(historyRoute).then(res => res.json()).then(history => {
+                    history.forEach(msg => {
+                        appendMessage(msg.content, msg.role); 
+                    });
+                }).catch(err => console.error("Geçmiş yüklenemedi:", err));
+            }
+        });
+    </script>
 </body>
 </html>
 """
 
 ANIME_CHAT_TEMPLATE = HTML_TEMPLATE.replace('Aurion - Gelişmiş Yapay Zeka', 'Aurion - Anime Sohbeti').replace(
     'placeholder="Aurion\'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)">', 
-    'placeholder="Anime Aurion\'a bir anime/manga sorusu sor.">'
-)
+    'placeholder="Anime Aurion\'a bir anime/manga sorusu sor."'
+).replace('id="message-input"', 'id="anime-message-input"')
 
 LOGIN_TEMPLATE = """
 <!DOCTYPE html>
@@ -819,21 +767,29 @@ LOGIN_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Giriş</title>
-    <style>""" + BASE_CSS + """ .container { max-width: 400px; margin: 100px auto; padding: 20px; background: #222; border-radius: 10px; } input[type=text], input[type=password] { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #555; border-radius: 4px; box-sizing: border-box; background: #333; color:white; } button { background-color: #007BFF; color: white; padding: 14px 20px; margin: 8px 0; border: none; border-radius: 4px; cursor: pointer; width: 100%; }</style>
+    <style>
+        :root { --bg-dark: #121212; --text-dark: #E0E0E0; --primary-color: #007BFF; }
+        body, html { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; height: 100vh; display: flex; align-items: center; justify-content: center; background-color: var(--bg-dark); color: var(--text-dark); }
+        .container { max-width: 400px; padding: 40px; background: #1f1f1f; border-radius: 10px; box-shadow: 0 0 15px rgba(0, 123, 255, 0.2); }
+        input[type=text], input[type=password] { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #333; border-radius: 6px; box-sizing: border-box; background: #2a2a2a; color: white; font-size: 16px; }
+        button { background-color: #007BFF; color: white; padding: 14px 20px; margin: 15px 0; border: none; border-radius: 6px; cursor: pointer; width: 100%; font-size: 16px; transition: background-color 0.3s; }
+        button:hover { background-color: #0056b3; }
+        a { color: #007BFF; text-decoration: none; }
+    </style>
 </head>
 <body class="dark">
     <div class="container">
-        <h2 style="text-align:center; color:#007BFF;">AURION Giriş</h2>
-        {% if error %}<p style="color:red; text-align:center;">{{ error }}</p>{% endif %}
-        {% if success %}<p style="color:green; text-align:center;">{{ success }}</p>{% endif %}
+        <h2 style="text-align:center; color:#007BFF; margin-top: 0;">AURION Giriş</h2>
+        {% if error %}<p style="color:#dc3545; text-align:center;">{{ error }}</p>{% endif %}
+        {% if success %}<p style="color:#28a745; text-align:center;">{{ success }}</p>{% endif %}
         <form method="POST">
-            <label for="username">Kullanıcı Adı</label>
+            <label for="username" style="display:block; margin-bottom: 5px;">Kullanıcı Adı</label>
             <input type="text" id="username" name="username" required>
-            <label for="password">Şifre</label>
+            <label for="password" style="display:block; margin-bottom: 5px;">Şifre</label>
             <input type="password" id="password" name="password" required>
             <button type="submit">Giriş Yap</button>
         </form>
-        <p style="text-align:center;"><a href="{{ url_for('register') }}" style="color:#007BFF;">Hesabınız yok mu? Kayıt olun.</a></p>
+        <p style="text-align:center; margin-top: 20px;"><a href="{{ url_for('register') }}">Hesabınız yok mu? Kayıt olun.</a></p>
     </div>
 </body>
 </html>
@@ -849,8 +805,17 @@ ADMIN_PANEL_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Admin Paneli</title>
-    <style>""" + BASE_CSS + """
-        .content-container { padding: 20px; overflow-y: auto; }
+    <style>
+        :root { --bg-dark: #121212; --text-dark: #E0E0E0; --primary-color: #007BFF; --sidebar-width: 200px; --admin-color: #FFA500; --super-admin-color: #FFD700; }
+        body, html { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; height: 100vh; overflow: hidden; }
+        body.dark { background-color: var(--bg-dark); color: var(--text-dark); }
+        .sidebar { width: var(--sidebar-width); padding: 20px; background: #1f1f1f; color: var(--text-dark); box-shadow: 2px 0 5px rgba(0,0,0,0.3); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; }
+        .content-container { flex-grow: 1; padding: 20px; overflow-y: auto; }
+        h1.logo { color: var(--primary-color); }
+        .super-admin-link { color: var(--super-admin-color) !important; }
+        .admin-link { color: var(--admin-color) !important; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; } th, td { padding: 10px; border: 1px solid #333; text-align: left; } th { background: #333; color: white; }
+        .ban-btn { background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 5px; cursor: pointer; }
         .log-entry { font-size: 0.9em; padding: 5px 0; border-bottom: 1px solid #222; }
     </style>
 </head>
