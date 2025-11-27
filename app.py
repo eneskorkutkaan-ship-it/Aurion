@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V10.7 (Tüm Hata Düzeltmeleri ve Zorunlu Arama Komutu)
+# AURION PROJESİ - V10.8 (Tüm Hata Yamaları ve Zorunlu Arama)
 # ==============================================================================
 
 import os
@@ -52,7 +52,6 @@ def get_db(max_retries=5, delay=1):
     for attempt in range(max_retries):
         try:
             if 'db' not in g or not g.db.conn:
-                # DB HATA ÇÖZÜMÜ: timeout parametresi kaldırıldı.
                 g.db = sqlite_utils.Database(DATABASE_URL)
                 g.db.conn.execute("PRAGMA busy_timeout = 30000;") 
             return g.db
@@ -153,14 +152,14 @@ def search_internet(query: str) -> dict:
     # 🚨 KRİTİK LOGLAMA ADIMI
     print(f"*** [AURION SEARCH TRIGGERED] AI/Kullanıcı tarafından arama fonksiyonu çağrıldı. Sorgu: '{query}'", file=sys.stdout)
     
+    # 💥 API ANAHTAR KONTROLÜ VE HATA YAMASI
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX_ID:
-        error_msg = "GOOGLE API anahtarları eksik. İnternet araması devre dışı."
+        error_msg = "GOOGLE API anahtarları eksik. İnternet araması devre dışı. Lütfen Render ortam değişkenlerini kontrol edin."
         print(f"!!! [SEARCH API ERROR] {error_msg}", file=sys.stderr)
-        return {"search_result": f"**[HATA]** {error_msg}. Lütfen sunucu değişkenlerini kontrol edin."}
+        return {"search_result": f"**[HATA]** {error_msg}"}
     
     try:
         service = build("customsearch", "v1", developerKey=GOOGLE_SEARCH_API_KEY)
-        # Sadece 3 sonuç alarak kotayı azaltabiliriz.
         res = service.cse().list(q=query, cx=GOOGLE_SEARCH_CX_ID, num=3).execute() 
         
         search_results = []
@@ -176,7 +175,6 @@ def search_internet(query: str) -> dict:
             result_text = "**[Arama Yapıldı]** Güncel Bilgiler:\n"
             for r in search_results:
                 snippet = r['snippet'].replace('\n', ' ').strip()
-                # 200 karakterle sınırlama
                 result_text += f"- **{r['title']}** ({r['source']}): {snippet[:200]}...\n" 
             return {"search_result": result_text}
             
@@ -184,9 +182,10 @@ def search_internet(query: str) -> dict:
 
     except Exception as e:
         error_type = type(e).__name__
-        error_msg = f"Google Arama API'sine erişim sağlanamadı. Hata Tipi: {error_type}. Kota veya Anahtar Hatası Olabilir."
+        # 💥 EN SIK KARŞILAŞILAN API HATASI YAMASI (403: Yetki/Kota, 400: Anahtar Hataları)
+        error_msg = f"Google Arama API'sine erişim sağlanamadı. Hata Tipi: {error_type}. API Kısıtlamalarını veya Kotayı Kontrol Edin."
         print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
-        return {"search_result": f"**[HATA]** İnternet Arama Hatası: {error_msg}"}
+        return {"search_result": f"**[HATA]** İnternet Arama Hatası: {error_msg}. Detay: {str(e)}"}
 
 # Diğer tool fonksiyonları aynı kalır...
 def ban_user_tool(username: str, reason: str) -> str:
@@ -298,20 +297,18 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
                     tool_result_dict = tool_func(**function_args)
                     tool_result_content = {"result": tool_result_dict.get('search_result') if function_name == 'search_internet' else tool_result_dict}
                 
-                # Aracı çalıştırma sonucunu AI'a geri gönder
                 contents.append(types.Content(role="model", parts=[types.Part.from_function_call(function_call)]))
                 contents.append(types.Content(role="tool", parts=[types.Part.from_function_response(name=function_name, response=tool_result_content)]))
 
-                # İkinci çağrıyı yap (AI'ın yanıtı oluşturması için)
                 response = client.models.generate_content(
                     model=model_name,
                     contents=contents,
                     config=config
                 )
                 
-                # Arama Sonucunu Yanıtın Başına Ekle
                 final_text = response.text
                 if function_name == 'search_internet' and 'search_result' in tool_result_dict:
+                    # Arama sonucunu yanıtın başına ekle (sadece başarılı tool çağrısı sonucu)
                     final_text = tool_result_dict['search_result'] + "\n\n" + final_text
                 
                 return {"text": final_text}, response
@@ -351,7 +348,7 @@ def api_chat():
     user_id = session['user_id']
     user = g.user 
     
-    # ⭐ V10.7 KRİTİK DEĞİŞİKLİK: YEREL KOMUT İŞLEME VE /SEARCH EKLEME
+    # ⭐ V10.8 KRİTİK DÜZELTME: /SEARCH İLE ARAMAYI ZORLAMA
     if user_message.startswith('/'):
         command_match = re.match(r'/(\w+)\s*(.*)', user_message)
         if command_match:
@@ -367,19 +364,20 @@ def api_chat():
                 if len(parts) == 2: result = teach_software_tool(parts[0], parts[1])
                 else: result = "Hata: /teach komutu '/teach yazılım konu' formatında olmalıdır."
             
-            # 👇 YENİ KOMUT: /SEARCH İLE ARAMAYI ZORLAMA 👇
+            # 👇 /SEARCH İLE ARAMAYI ZORLAMA 👇
             elif command == 'search':
+                print(f"*** [AURION COMMAND] Kullanıcı zorunlu arama komutunu kullandı: {user_message}", file=sys.stdout)
                 if not args:
                     result = "Hata: /search komutu '/search [sorgu]' formatında olmalıdır."
                 else:
-                    search_result_dict = search_internet(args) # search_internet fonksiyonunu direkt çağır
+                    search_result_dict = search_internet(args) 
                     
                     if 'search_result' in search_result_dict:
                         # Yanıtı doğrudan arama sonucuyla oluştur
                         result = f"**[Kullanıcı Komutuyla Arama]**\n{search_result_dict['search_result']}"
                     else:
                          result = "Hata: Arama fonksiyonundan beklenmedik bir sonuç geldi."
-            # 👆 YENİ KOMUT SONU 👆
+            # 👆 /SEARCH KOMUTU SONU 👆
 
             elif command == 'ban' and user["role"] in ('admin', 'super_admin'):
                 parts = args.split(maxsplit=1)
@@ -415,141 +413,13 @@ def api_chat():
     
     return jsonify({"success": True, "response": ai_text})
 
-@app.route('/api/history', methods=['GET'])
-@login_required
-def api_history():
-    user_id = session['user_id']
-    session_id = session.get('current_chat_session') 
-    if not session_id: return jsonify([])
-    
-    history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
-    return jsonify(history)
-
-@app.route('/anime')
-@login_required
-@role_required('super_admin')
-def anime_chat_page():
-    user = g.user
-    return render_template_string(ANIME_CHAT_TEMPLATE, user=user)
-
-@app.route('/api/anime_chat', methods=['POST'])
-@login_required
-@role_required('super_admin')
-@limiter.limit("15 per minute")
-def api_anime_chat():
-    data = request.json
-    user_message = data.get('message', '').strip()
-    if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
-
-    user_id = session['user_id']
-    user = g.user
-    
-    ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True) 
-    ai_text = ai_response_data["text"]
-    
-    if "status" in ai_response_data:
-        return jsonify({"success": False, "message": ai_text}), ai_response_data["status"]
-    
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            db = get_db()
-            db["anime_messages"].insert_all([
-                {"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()},
-                {"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now() + timedelta(seconds=1)}
-            ], alter=True)
-            break 
-        except sqlite_utils.db.OperationalError: time.sleep(1)
-        except Exception: break
-            
-    return jsonify({"success": True, "response": ai_text})
-
-@app.route('/api/anime_history', methods=['GET'])
-@login_required
-@role_required('super_admin')
-def api_anime_history():
-    user_id = session['user_id']
-    history = list(get_db()["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
-    return jsonify(history)
-
-@app.route('/admin')
-@login_required
-@role_required('admin')
-def admin_panel():
-    db = get_db()
-    users = list(db["users"].rows_where(where="1", order_by="id"))
-    logs = list(db["admin_logs"].rows_where(where="1", order_by="-timestamp", limit=50))
-    user = g.user
-    return render_template_string(ADMIN_PANEL_TEMPLATE, user=user, users=users, logs=logs)
-
-@app.route('/admin/ban/<int:user_id>', methods=['POST'])
-@login_required
-@role_required('admin')
-def admin_ban_user(user_id):
-    db = get_db()
-    if user_id == session['user_id']: 
-        return redirect(url_for('admin_panel'))
-        
-    user_list = list(db["users"].rows_where("id = ?", [user_id]))
-    target_user = user_list[0] if user_list else None
-    
-    if target_user and target_user['role'] == 'super_admin':
-        return redirect(url_for('admin_panel'))
-        
-    if target_user:
-        db["users"].update(user_id, {"is_banned": True})
-        db["admin_logs"].insert({"admin_id": session.get('user_id'), "action": "Yasaklama", "target_username": target_user['username'], "timestamp": datetime.now()})
-        return redirect(url_for('admin_panel'))
-    return redirect(url_for('admin_panel'))
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        user_list = list(get_db()["users"].rows_where("username = ?", [username]))
-        user = user_list[0] if user_list else None
-        
-        if user and check_password_hash(user['password_hash'], password):
-            if user['is_banned']:
-                return render_template_string(LOGIN_TEMPLATE, error="Hesabınız yasaklanmıştır.")
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['ai_persona'] = user['theme'] 
-            session['current_chat_session'] = str(uuid.uuid4())
-            return redirect(url_for('index'))
-        return render_template_string(LOGIN_TEMPLATE, error="Geçersiz kullanıcı adı veya şifre.")
-    
-    return render_template_string(LOGIN_TEMPLATE)
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        db = get_db()
-        if list(db["users"].rows_where("username = ?", [username])):
-            return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten alınmış.")
-        
-        # Kullanıcı başarıyla eklendikten sonra login sayfasına yönlendirme.
-        db["users"].insert({"username": username, "password_hash": generate_password_hash(password)}, alter=True)
-        return redirect(url_for('login', success="Kayıt başarılı. Lütfen giriş yapın."))
-
-    return render_template_string(REGISTER_TEMPLATE)
-
-@app.route('/logout')
-@login_required
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
+# Diğer yollar (Routes) aynı kalır...
+# ... (admin, login, register, logout, anime_chat_page, api_anime_chat, api_anime_history, api_history, admin_ban_user)
 
 # ==============================================================================
 # 5. GÖMÜLÜ ŞABLONLAR
 # ==============================================================================
-# Sözdizimi hatalarını önlemek için tırnak işaretleri kontrol edildi.
-
+# (Tüm HTML ve CSS/JS şablonları V10.7'deki ile aynı kalır)
 BASE_CSS = """:root {
     --bg-dark: #121212;
     --text-dark: #E0E0E0;
@@ -856,6 +726,137 @@ ADMIN_PANEL_TEMPLATE = """
 </body>
 </html>
 """
+
+# ... (Kalan yollar ve şablonlar eklenecek) ...
+@app.route('/api/history', methods=['GET'])
+@login_required
+def api_history():
+    user_id = session['user_id']
+    session_id = session.get('current_chat_session') 
+    if not session_id: return jsonify([])
+    
+    history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
+    return jsonify(history)
+
+@app.route('/anime')
+@login_required
+@role_required('super_admin')
+def anime_chat_page():
+    user = g.user
+    return render_template_string(ANIME_CHAT_TEMPLATE, user=user)
+
+@app.route('/api/anime_chat', methods=['POST'])
+@login_required
+@role_required('super_admin')
+@limiter.limit("15 per minute")
+def api_anime_chat():
+    data = request.json
+    user_message = data.get('message', '').strip()
+    if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
+
+    user_id = session['user_id']
+    user = g.user
+    
+    ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True) 
+    ai_text = ai_response_data["text"]
+    
+    if "status" in ai_response_data:
+        return jsonify({"success": False, "message": ai_text}), ai_response_data["status"]
+    
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            db = get_db()
+            db["anime_messages"].insert_all([
+                {"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()},
+                {"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now() + timedelta(seconds=1)}
+            ], alter=True)
+            break 
+        except sqlite_utils.db.OperationalError: time.sleep(1)
+        except Exception: break
+            
+    return jsonify({"success": True, "response": ai_text})
+
+@app.route('/api/anime_history', methods=['GET'])
+@login_required
+@role_required('super_admin')
+def api_anime_history():
+    user_id = session['user_id']
+    history = list(get_db()["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
+    return jsonify(history)
+
+@app.route('/admin')
+@login_required
+@role_required('admin')
+def admin_panel():
+    db = get_db()
+    users = list(db["users"].rows_where(where="1", order_by="id"))
+    logs = list(db["admin_logs"].rows_where(where="1", order_by="-timestamp", limit=50))
+    user = g.user
+    return render_template_string(ADMIN_PANEL_TEMPLATE, user=user, users=users, logs=logs)
+
+@app.route('/admin/ban/<int:user_id>', methods=['POST'])
+@login_required
+@role_required('admin')
+def admin_ban_user(user_id):
+    db = get_db()
+    if user_id == session['user_id']: 
+        return redirect(url_for('admin_panel'))
+        
+    user_list = list(db["users"].rows_where("id = ?", [user_id]))
+    target_user = user_list[0] if user_list else None
+    
+    if target_user and target_user['role'] == 'super_admin':
+        return redirect(url_for('admin_panel'))
+        
+    if target_user:
+        db["users"].update(user_id, {"is_banned": True})
+        db["admin_logs"].insert({"admin_id": session.get('user_id'), "action": "Yasaklama", "target_username": target_user['username'], "timestamp": datetime.now()})
+        return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin_panel'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        user_list = list(get_db()["users"].rows_where("username = ?", [username]))
+        user = user_list[0] if user_list else None
+        
+        if user and check_password_hash(user['password_hash'], password):
+            if user['is_banned']:
+                return render_template_string(LOGIN_TEMPLATE, error="Hesabınız yasaklanmıştır.")
+            session['user_id'] = user['id']
+            session['username'] = user['username']
+            session['ai_persona'] = user['theme'] 
+            session['current_chat_session'] = str(uuid.uuid4())
+            return redirect(url_for('index'))
+        return render_template_string(LOGIN_TEMPLATE, error="Geçersiz kullanıcı adı veya şifre.")
+    
+    return render_template_string(LOGIN_TEMPLATE)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        db = get_db()
+        if list(db["users"].rows_where("username = ?", [username])):
+            return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten alınmış.")
+        
+        # Kullanıcı başarıyla eklendikten sonra login sayfasına yönlendirme.
+        db["users"].insert({"username": username, "password_hash": generate_password_hash(password)}, alter=True)
+        return redirect(url_for('login', success="Kayıt başarılı. Lütfen giriş yapın."))
+
+    return render_template_string(REGISTER_TEMPLATE)
+
+@app.route('/logout')
+@login_required
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
 
 # ==============================================================================
 # 6. UYGULAMA BAŞLATMA
