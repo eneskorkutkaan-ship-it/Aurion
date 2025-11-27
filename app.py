@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V13.0 (Inline CSS ve Basitleştirilmiş Arama)
+# AURION PROJESİ - V14.0 (Nihai Stabil ve Hata Düzeltilmiş Sürüm)
 # ==============================================================================
 
 import os
@@ -12,8 +12,6 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from google import genai
 from google.genai import types
-# Googleapiclient kütüphanesine artık ihtiyacımız yok, kaldırdık.
-import json
 import sys
 import uuid
 import time
@@ -25,7 +23,6 @@ from urllib.parse import quote
 # ==============================================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# GOOGLE_SEARCH_CX_ID ve GOOGLE_SEARCH_API_KEY kaldırıldı.
 SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
 
 DATABASE_URL = "aurion.db"
@@ -52,6 +49,7 @@ def get_db(max_retries=5, delay=1):
     for attempt in range(max_retries):
         try:
             if 'db' not in g or not g.db.conn:
+                # KRİTİK DÜZELTME: Render günlüklerindeki 'timeout' hatası giderildi.
                 g.db = sqlite_utils.Database(DATABASE_URL)
                 g.db.conn.execute("PRAGMA busy_timeout = 30000;") 
             return g.db
@@ -102,14 +100,17 @@ limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"],
 # ==============================================================================
 
 def login_required(f):
+    # KRİTİK DÜZELTME: NoneType hatasını önlemek için doğru return yapısı
     def wrap(*args, **kwargs):
-        if 'user_id' not in session or not g.user: return redirect(url_for('login'))
+        if 'user_id' not in session or not g.user: 
+            return redirect(url_for('login'))
         return f(*args, **kwargs)
     wrap.__name__ = f.__name__
-    return login_required
+    return wrap
 
 def role_required(required_role):
     def decorator(f):
+        # KRİTİK DÜZELTME: NoneType hatasını önlemek için doğru return yapısı
         def wrap(*args, **kwargs):
             user = g.get('user')
             user_role = user["role"] if user else 'guest'
@@ -120,7 +121,8 @@ def role_required(required_role):
                 return "Erişim Reddedildi: Admin yetkisi gerekli.", 403
             return f(*args, **kwargs)
         wrap.__name__ = f.__name__
-        return decorator
+        return wrap
+    return decorator
 
 @app.before_request
 def make_session_permanent_and_assign_id():
@@ -143,8 +145,6 @@ def make_session_permanent_and_assign_id():
 # ==============================================================================
 # 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI
 # ==============================================================================
-
-# **search_internet fonksiyonu ve ilgili Google API importları kaldırıldı.**
 
 def ban_user_tool(username: str, reason: str) -> str:
     db = get_db()
@@ -183,7 +183,7 @@ def teach_software_tool(software_name: str, topic: str) -> str:
 
 def get_system_instruction(user_role, ai_persona, is_anime=False):
     # Arama motoru zorunluluğu kaldırıldı.
-    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur. En güncel konular için '/search [sorgu]' komutuyla Google'da arama yapılması gerektiğini kullanıcıya kibarca hatırlatabilirsin."
+    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur. En güncel konular için '/search [sorgu]' komutuyla Google'da arama yapılması gerektiğini kullanıcıya kibarca hatırlatabilirsin. Kullanıcı eğer bir tool çağrısı yapmak için komut kullanıyorsa (örneğin /mode, /clear), bu komutu görmezden gelmeli ve yalnızca komutun kendisini (Python kodundaki komut işleyicisi) çalıştırmalısın."
     
     if is_anime:
         base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'."
@@ -223,7 +223,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         
         system_instruction = get_system_instruction(user_role, ai_persona, is_anime=is_anime)
         
-        # search_internet aracı kaldırıldı, yalnızca diğer araçlar kaldı
         tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool]
 
         config = types.GenerateContentConfig(system_instruction=system_instruction, tools=tools)
@@ -297,7 +296,7 @@ def api_chat():
     user_id = session['user_id']
     user = g.user 
     
-    # ⭐ /SEARCH KOMUTU YENİ YAMA
+    # ⭐ KOMUT YAMASI
     if user_message.startswith('/'):
         command_match = re.match(r'/(\w+)\s*(.*)', user_message)
         if command_match:
@@ -317,7 +316,6 @@ def api_chat():
                 if not args:
                     result = "Hata: /search komutu '/search [sorgu]' formatında olmalıdır."
                 else:
-                    # Basit, doğrudan Google Arama URL'si oluşturma
                     encoded_query = quote(args)
                     search_url = f"https://www.google.com/search?q={encoded_query}"
                     result = f"**[Arama Komutu]** Aşağıdaki linke tıklayarak '{args}' sorgunuz için güncel sonuçları Google'da görüntüleyebilirsiniz: [Google Arama Sonuçları]({search_url})"
@@ -485,10 +483,8 @@ def logout():
     return redirect(url_for('login'))
 
 # ==============================================================================
-# 5. GÖMÜLÜ ŞABLONLAR (V13.0: Inline Style/Aşırı Güçlendirilmiş UI)
+# 5. GÖMÜLÜ ŞABLONLAR (V14.0: Inline Style/Güçlendirilmiş UI)
 # ==============================================================================
-
-# **UI Düzeltmesi: Chat kutusunun görünmeme ihtimalini ortadan kaldırmak için Inline CSS kullanıldı.**
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -526,6 +522,10 @@ HTML_TEMPLATE = """
             flex-grow: 1; 
             overflow-y: auto; 
             padding: 20px; 
+            /* Gerekli yüksekliğin hesaplanması için flexbox'a izin ver */
+            display: flex; 
+            flex-direction: column;
+            justify-content: flex-start;
         }
         .message { 
             margin-bottom: 15px; padding: 10px 15px; border-radius: 18px; max-width: 75%; line-height: 1.5; 
@@ -539,6 +539,7 @@ HTML_TEMPLATE = """
         }
         /* Sohbet kutusu stilini güçlendiriyoruz */
         .input-area {
+            /* Input alanının görünürlüğünü garanti ediyoruz */
             height: 70px; 
             min-height: 70px; 
             background: #1f1f1f; 
@@ -559,6 +560,7 @@ HTML_TEMPLATE = """
         .super-admin-link { color: var(--super-admin-color) !important; }
         .admin-link { color: var(--admin-color) !important; }
         pre { background: #000; padding: 10px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+        a { color: var(--super-admin-color); text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -590,8 +592,8 @@ HTML_TEMPLATE = """
         <div class="messages" id="messages">
         </div>
         
-        <div class="input-area" style="position: sticky; bottom: 0; width: 100%; box-sizing: border-box;">
-            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)" style="height: 40px;">
+        <div class="input-area">
+            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)">
             <button onclick="sendMessage(false)">Gönder</button>
         </div>
         </div>
@@ -645,8 +647,8 @@ HTML_TEMPLATE = """
             
             // Markdown işleme
             let htmlContent = text.replace(/\\n/g, '<br>');
-            // Linkler için yeni düzenleme
-            htmlContent = htmlContent.replace(/\\[(.*?)\\]\\((.*?)\\)/g, '<a href="$2" target="_blank" style="color: var(--super-admin-color); text-decoration: underline;">$1</a>');
+            // Linkler ve diğer MD kuralları
+            htmlContent = htmlContent.replace(/\\[(.*?)\\]\\((.*?)\\)/g, '<a href="$2" target="_blank">$1</a>');
             htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
             htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
             
@@ -846,7 +848,6 @@ ADMIN_PANEL_TEMPLATE = """
 
 if __name__ == '__main__':
     try:
-        # Debug modunu kapatıyoruz, çünkü Render'da hata verebilir.
         app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000)) 
     except Exception as e:
         print(f"!!! [AURION INIT ERROR] Uygulama başlatılamadı: {str(e)}", file=sys.stderr)
