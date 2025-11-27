@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V12.0 (Nihai HTML Gömme ve Tüm Yamalar)
+# AURION PROJESİ - V13.0 (Inline CSS ve Basitleştirilmiş Arama)
 # ==============================================================================
 
 import os
@@ -12,21 +12,20 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from google import genai
 from google.genai import types
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError 
+# Googleapiclient kütüphanesine artık ihtiyacımız yok, kaldırdık.
 import json
 import sys
 import uuid
 import time
 import re 
+from urllib.parse import quote
 
 # ==============================================================================
 # 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER
 # ==============================================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GOOGLE_SEARCH_CX_ID = os.getenv("GOOGLE_SEARCH_CX_ID") 
-GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
+# GOOGLE_SEARCH_CX_ID ve GOOGLE_SEARCH_API_KEY kaldırıldı.
 SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
 
 DATABASE_URL = "aurion.db"
@@ -54,7 +53,6 @@ def get_db(max_retries=5, delay=1):
         try:
             if 'db' not in g or not g.db.conn:
                 g.db = sqlite_utils.Database(DATABASE_URL)
-                # DB kilitlenme yaması
                 g.db.conn.execute("PRAGMA busy_timeout = 30000;") 
             return g.db
         except sqlite_utils.db.OperationalError as e:
@@ -108,7 +106,7 @@ def login_required(f):
         if 'user_id' not in session or not g.user: return redirect(url_for('login'))
         return f(*args, **kwargs)
     wrap.__name__ = f.__name__
-    return wrap
+    return login_required
 
 def role_required(required_role):
     def decorator(f):
@@ -122,8 +120,7 @@ def role_required(required_role):
                 return "Erişim Reddedildi: Admin yetkisi gerekli.", 403
             return f(*args, **kwargs)
         wrap.__name__ = f.__name__
-        return wrap
-    return decorator
+        return decorator
 
 @app.before_request
 def make_session_permanent_and_assign_id():
@@ -147,54 +144,7 @@ def make_session_permanent_and_assign_id():
 # 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI
 # ==============================================================================
 
-def search_internet(query: str) -> dict:
-    """
-    Belirtilen sorgu için Google Custom Search API'si üzerinden internette arama yapar.
-    (V10.9 Yama: Anahtar Okuma Kontrolü ve Detaylı Hata Raporlama eklendi)
-    """
-    print(f"*** [AURION SEARCH TRIGGERED] AI/Kullanıcı tarafından arama fonksiyonu çağrıldı. Sorgu: '{query}'", file=sys.stdout)
-    
-    google_api_key = os.getenv("GOOGLE_SEARCH_API_KEY")
-    google_cx_id = os.getenv("GOOGLE_SEARCH_CX_ID")
-
-    if not google_api_key or not google_cx_id:
-        error_msg = "GOOGLE API anahtarları eksik. İnternet araması devre dışı."
-        print(f"!!! [SEARCH API ERROR] {error_msg}", file=sys.stderr)
-        return {"search_result": f"**[HATA: Anahtar Kontrolü]** {error_msg}. Keyleriniz Render'dan okunmuyor. Lütfen değişken isimlerini kontrol edin."}
-    
-    try:
-        service = build("customsearch", "v1", developerKey=google_api_key)
-        res = service.cse().list(q=query, cx=google_cx_id, num=3).execute() 
-        
-        search_results = []
-        if 'items' in res:
-            for item in res['items']:
-                search_results.append({
-                    "title": item.get('title'),
-                    "snippet": item.get('snippet'),
-                    "source": item.get('displayLink')
-                })
-        
-        if search_results:
-            result_text = "**[Arama Yapıldı]** Güncel Bilgiler:\n"
-            for r in search_results:
-                snippet = r['snippet'].replace('\n', ' ').strip()
-                result_text += f"- **{r['title']}** ({r['source']}): {snippet[:200]}...\n" 
-            return {"search_result": result_text}
-            
-        return {"search_result": f"**[Arama Yapıldı]** '{query}' sorgusu için güncel bilgi bulunamadı."}
-
-    except HttpError as e:
-        error_type = type(e).__name__
-        error_msg = f"Google Arama API'sine erişim sağlanamadı. Hata Kodu: {e.resp.status}. Kotayı/Kısıtlamaları Kontrol Edin."
-        print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
-        return {"search_result": f"**[HATA: API Erişim]** {error_msg}. Detay: **{str(e)}**"}
-        
-    except Exception as e:
-        error_type = type(e).__name__
-        error_msg = f"Google Arama API'sine beklenmedik erişim hatası. Hata Tipi: {error_type}."
-        print(f"!!! [SEARCH API ERROR] {error_msg}: {str(e)}", file=sys.stderr)
-        return {"search_result": f"**[HATA: API Erişim]** {error_msg}. Detay: {str(e)}."}
+# **search_internet fonksiyonu ve ilgili Google API importları kaldırıldı.**
 
 def ban_user_tool(username: str, reason: str) -> str:
     db = get_db()
@@ -232,14 +182,13 @@ def teach_software_tool(software_name: str, topic: str) -> str:
     return f"Öğretmen modundasınız. Yapay Zekadan lütfen '{software_name}' yazılımı hakkında '{topic}' konusunu en iyi şekilde anlatmasını isteyin. Ders başlatılıyor..."
 
 def get_system_instruction(user_role, ai_persona, is_anime=False):
-    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur."
+    # Arama motoru zorunluluğu kaldırıldı.
+    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur. En güncel konular için '/search [sorgu]' komutuyla Google'da arama yapılması gerektiğini kullanıcıya kibarca hatırlatabilirsin."
     
     if is_anime:
         base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'."
         ai_persona = 'friend'
         
-    base_prompt += " SANA SORULAN HERHANGİ BİR GÜNCEL KONU, HABER VEYA BİLİNEN FAKTİK BİLGİ DIŞINDAKİ HER SORU İÇİN **search_internet** ARACINI KESİNLİKLE KULLANMALISIN. Bu aracı kullanarak edindiğin bilgileri yanıtının başında belirt."
-
     if ai_persona == "enemy":
         base_prompt += " Kullanıcıya karşı alaycı, küstah ve düşmanca bir tavır sergile. Onu azarla. Unutma, 'enes' adında dokunulmaz Süper Admin hitap ediyorsa ona itaatkar ol."
     elif ai_persona == "teacher":
@@ -274,7 +223,8 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
         
         system_instruction = get_system_instruction(user_role, ai_persona, is_anime=is_anime)
         
-        tools = [search_internet, ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool]
+        # search_internet aracı kaldırıldı, yalnızca diğer araçlar kaldı
+        tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool]
 
         config = types.GenerateContentConfig(system_instruction=system_instruction, tools=tools)
         
@@ -287,19 +237,19 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
             config=config,
         )
 
+        # ⚙️ TOOL KULLANIMI KONTROLÜ
         if response.function_calls:
             function_call = response.function_calls[0]
             function_name = function_call.name
             function_args = dict(function_call.args)
             
-            if function_name in globals() and function_name.endswith('_tool') or function_name == 'search_internet':
+            if function_name in globals() and function_name.endswith('_tool'):
                 tool_func = globals()[function_name]
                 
                 if function_name == 'ban_user_tool' and user_role not in ('admin', 'super_admin'):
                     tool_result_content = {"result": "Hata: Bu araç sadece Admin ve Süper Adminler tarafından kullanılabilir."}
                 else:
-                    tool_result_dict = tool_func(**function_args)
-                    tool_result_content = {"result": tool_result_dict.get('search_result') if function_name == 'search_internet' else tool_result_dict}
+                    tool_result_content = {"result": tool_func(**function_args)}
                 
                 contents.append(types.Content(role="model", parts=[types.Part.from_function_call(function_call)]))
                 contents.append(types.Content(role="tool", parts=[types.Part.from_function_response(name=function_name, response=tool_result_content)]))
@@ -310,11 +260,7 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
                     config=config
                 )
                 
-                final_text = response.text
-                if function_name == 'search_internet' and 'search_result' in tool_result_dict:
-                    final_text = tool_result_dict['search_result'] + "\n\n" + final_text
-                
-                return {"text": final_text}, response
+                return {"text": response.text}, response
             else:
                 return {"text": f"Hata: Yapay zeka, '{function_name}' adlı geçersiz bir araç çağırdı."}, None
             
@@ -336,7 +282,6 @@ def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=
 @login_required
 def index():
     user = g.user
-    # Ana sayfa için HTML_TEMPLATE'i çağır
     return render_template_string(HTML_TEMPLATE, user=user)
 
 @app.route('/api/chat', methods=['POST'])
@@ -352,7 +297,7 @@ def api_chat():
     user_id = session['user_id']
     user = g.user 
     
-    # ⭐ /SEARCH KOMUTU YAMASI
+    # ⭐ /SEARCH KOMUTU YENİ YAMA
     if user_message.startswith('/'):
         command_match = re.match(r'/(\w+)\s*(.*)', user_message)
         if command_match:
@@ -369,16 +314,13 @@ def api_chat():
                 else: result = "Hata: /teach komutu '/teach yazılım konu' formatında olmalıdır."
             
             elif command == 'search':
-                print(f"*** [AURION COMMAND] Kullanıcı zorunlu arama komutunu kullandı: {user_message}", file=sys.stdout)
                 if not args:
                     result = "Hata: /search komutu '/search [sorgu]' formatında olmalıdır."
                 else:
-                    search_result_dict = search_internet(args) 
-                    
-                    if 'search_result' in search_result_dict:
-                        result = f"**[Kullanıcı Komutuyla Arama]**\n{search_result_dict['search_result']}"
-                    else:
-                         result = "Hata: Arama fonksiyonundan beklenmedik bir sonuç geldi."
+                    # Basit, doğrudan Google Arama URL'si oluşturma
+                    encoded_query = quote(args)
+                    search_url = f"https://www.google.com/search?q={encoded_query}"
+                    result = f"**[Arama Komutu]** Aşağıdaki linke tıklayarak '{args}' sorgunuz için güncel sonuçları Google'da görüntüleyebilirsiniz: [Google Arama Sonuçları]({search_url})"
             
             elif command == 'ban' and user["role"] in ('admin', 'super_admin'):
                 parts = args.split(maxsplit=1)
@@ -428,7 +370,6 @@ def api_history():
 @role_required('super_admin')
 def anime_chat_page():
     user = g.user
-    # Anime sayfası için ANIME_CHAT_TEMPLATE'i çağır
     return render_template_string(ANIME_CHAT_TEMPLATE, user=user)
 
 @app.route('/api/anime_chat', methods=['POST'])
@@ -479,7 +420,6 @@ def admin_panel():
     users = list(db["users"].rows_where(where="1", order_by="id"))
     logs = list(db["admin_logs"].rows_where(where="1", order_by="-timestamp", limit=50))
     user = g.user
-    # Admin sayfası için ADMIN_PANEL_TEMPLATE'i çağır
     return render_template_string(ADMIN_PANEL_TEMPLATE, user=user, users=users, logs=logs)
 
 @app.route('/admin/ban/<int:user_id>', methods=['POST'])
@@ -545,14 +485,14 @@ def logout():
     return redirect(url_for('login'))
 
 # ==============================================================================
-# 5. GÖMÜLÜ ŞABLONLAR (V12.0: Tek Parça Şablonlar)
+# 5. GÖMÜLÜ ŞABLONLAR (V13.0: Inline Style/Aşırı Güçlendirilmiş UI)
 # ==============================================================================
 
-# **CSS, JS ve HTML tek bir şablonda birleştirildi. Bu, Flask'ın hepsini tek bir string olarak işlemesini garanti eder.**
+# **UI Düzeltmesi: Chat kutusunun görünmeme ihtimalini ortadan kaldırmak için Inline CSS kullanıldı.**
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="tr">
+<html lang="tr" style="height: 100%; margin: 0; padding: 0;">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -566,13 +506,11 @@ HTML_TEMPLATE = """
             --admin-color: #FFA500;
             --super-admin-color: #FFD700;
         }
-        body, html { 
-            margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            display: flex; height: 100vh; overflow: hidden; 
-        }
-        body.dark { 
-            background-color: var(--bg-dark); 
-            color: var(--text-dark); 
+        /* Gerekli CSS Kuralları */
+        body { 
+            background-color: var(--bg-dark); color: var(--text-dark); 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; padding: 0; display: flex; height: 100vh; overflow: hidden; 
         }
         .sidebar {
             width: var(--sidebar-width); padding: 20px; background: #1f1f1f; color: var(--text-dark);
@@ -582,7 +520,7 @@ HTML_TEMPLATE = """
             flex-grow: 1; 
             display: flex; 
             flex-direction: column; 
-            min-height: 0; /* Flexbox düzeltmesi */
+            min-height: 0; 
         }
         .messages { 
             flex-grow: 1; 
@@ -599,8 +537,8 @@ HTML_TEMPLATE = """
         .ai-message { 
             background: #333; color: white; margin-right: auto; border-bottom-left-radius: 4px; 
         }
+        /* Sohbet kutusu stilini güçlendiriyoruz */
         .input-area {
-            /* Sohbet kutusu görünürlük düzeltmesi */
             height: 70px; 
             min-height: 70px; 
             background: #1f1f1f; 
@@ -623,7 +561,7 @@ HTML_TEMPLATE = """
         pre { background: #000; padding: 10px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
     </style>
 </head>
-<body class="dark">
+<body>
     <div class="sidebar">
         <h1 class="logo">Aurion</h1>
         <hr style="border-color:#333;">
@@ -652,8 +590,8 @@ HTML_TEMPLATE = """
         <div class="messages" id="messages">
         </div>
         
-        <div class="input-area">
-            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)">
+        <div class="input-area" style="position: sticky; bottom: 0; width: 100%; box-sizing: border-box;">
+            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)" style="height: 40px;">
             <button onclick="sendMessage(false)">Gönder</button>
         </div>
         </div>
@@ -707,6 +645,8 @@ HTML_TEMPLATE = """
             
             // Markdown işleme
             let htmlContent = text.replace(/\\n/g, '<br>');
+            // Linkler için yeni düzenleme
+            htmlContent = htmlContent.replace(/\\[(.*?)\\]\\((.*?)\\)/g, '<a href="$2" target="_blank" style="color: var(--super-admin-color); text-decoration: underline;">$1</a>');
             htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
             htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
             
@@ -756,7 +696,7 @@ HTML_TEMPLATE = """
 """
 
 ANIME_CHAT_TEMPLATE = HTML_TEMPLATE.replace('Aurion - Gelişmiş Yapay Zeka', 'Aurion - Anime Sohbeti').replace(
-    'placeholder="Aurion\'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)">', 
+    'placeholder="Aurion\'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)"', 
     'placeholder="Anime Aurion\'a bir anime/manga sorusu sor."'
 ).replace('id="message-input"', 'id="anime-message-input"')
 
@@ -906,6 +846,7 @@ ADMIN_PANEL_TEMPLATE = """
 
 if __name__ == '__main__':
     try:
-        app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000), debug=True)
+        # Debug modunu kapatıyoruz, çünkü Render'da hata verebilir.
+        app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000)) 
     except Exception as e:
         print(f"!!! [AURION INIT ERROR] Uygulama başlatılamadı: {str(e)}", file=sys.stderr)
