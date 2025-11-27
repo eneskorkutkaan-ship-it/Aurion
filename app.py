@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V14.0 (Nihai Stabil ve Hata Düzeltilmiş Sürüm)
+# AURION PROJESİ - V15.0 (Nihai Stabil Sürüm: UI Görünürlük Garantisi)
 # ==============================================================================
 
 import os
@@ -49,7 +49,6 @@ def get_db(max_retries=5, delay=1):
     for attempt in range(max_retries):
         try:
             if 'db' not in g or not g.db.conn:
-                # KRİTİK DÜZELTME: Render günlüklerindeki 'timeout' hatası giderildi.
                 g.db = sqlite_utils.Database(DATABASE_URL)
                 g.db.conn.execute("PRAGMA busy_timeout = 30000;") 
             return g.db
@@ -100,7 +99,6 @@ limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"],
 # ==============================================================================
 
 def login_required(f):
-    # KRİTİK DÜZELTME: NoneType hatasını önlemek için doğru return yapısı
     def wrap(*args, **kwargs):
         if 'user_id' not in session or not g.user: 
             return redirect(url_for('login'))
@@ -110,7 +108,6 @@ def login_required(f):
 
 def role_required(required_role):
     def decorator(f):
-        # KRİTİK DÜZELTME: NoneType hatasını önlemek için doğru return yapısı
         def wrap(*args, **kwargs):
             user = g.get('user')
             user_role = user["role"] if user else 'guest'
@@ -182,7 +179,6 @@ def teach_software_tool(software_name: str, topic: str) -> str:
     return f"Öğretmen modundasınız. Yapay Zekadan lütfen '{software_name}' yazılımı hakkında '{topic}' konusunu en iyi şekilde anlatmasını isteyin. Ders başlatılıyor..."
 
 def get_system_instruction(user_role, ai_persona, is_anime=False):
-    # Arama motoru zorunluluğu kaldırıldı.
     base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur. En güncel konular için '/search [sorgu]' komutuyla Google'da arama yapılması gerektiğini kullanıcıya kibarca hatırlatabilirsin. Kullanıcı eğer bir tool çağrısı yapmak için komut kullanıyorsa (örneğin /mode, /clear), bu komutu görmezden gelmeli ve yalnızca komutun kendisini (Python kodundaki komut işleyicisi) çalıştırmalısın."
     
     if is_anime:
@@ -483,7 +479,7 @@ def logout():
     return redirect(url_for('login'))
 
 # ==============================================================================
-# 5. GÖMÜLÜ ŞABLONLAR (V14.0: Inline Style/Güçlendirilmiş UI)
+# 5. GÖMÜLÜ ŞABLONLAR (V15.0: UI Görünürlük Garantisi)
 # ==============================================================================
 
 HTML_TEMPLATE = """
@@ -501,12 +497,18 @@ HTML_TEMPLATE = """
             --sidebar-width: 200px;
             --admin-color: #FFA500;
             --super-admin-color: #FFD700;
+            --input-height: 70px; /* Yeni değişken */
         }
-        /* Gerekli CSS Kuralları */
+        
+        /* KRİTİK: Ana yapıya mutlak yükseklik ve flex zorlaması */
         body { 
             background-color: var(--bg-dark); color: var(--text-dark); 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            margin: 0; padding: 0; display: flex; height: 100vh; overflow: hidden; 
+            margin: 0; padding: 0; 
+            display: flex; 
+            height: 100vh; /* Mutlak yükseklik */
+            min-height: 100vh; /* Garanti yükseklik */
+            overflow: hidden; 
         }
         .sidebar {
             width: var(--sidebar-width); padding: 20px; background: #1f1f1f; color: var(--text-dark);
@@ -516,16 +518,17 @@ HTML_TEMPLATE = """
             flex-grow: 1; 
             display: flex; 
             flex-direction: column; 
+            /* KRİTİK: Yüksekliği kalan alanı doldurmaya zorla */
+            height: 100%; 
             min-height: 0; 
         }
         .messages { 
             flex-grow: 1; 
             overflow-y: auto; 
             padding: 20px; 
-            /* Gerekli yüksekliğin hesaplanması için flexbox'a izin ver */
-            display: flex; 
-            flex-direction: column;
-            justify-content: flex-start;
+            /* KRİTİK: Yüksekliği hesaplamak için */
+            height: calc(100% - var(--input-height)); 
+            min-height: 1px; /* Boş olsa bile görünür olmasını sağla */
         }
         .message { 
             margin-bottom: 15px; padding: 10px 15px; border-radius: 18px; max-width: 75%; line-height: 1.5; 
@@ -537,17 +540,19 @@ HTML_TEMPLATE = """
         .ai-message { 
             background: #333; color: white; margin-right: auto; border-bottom-left-radius: 4px; 
         }
-        /* Sohbet kutusu stilini güçlendiriyoruz */
+        /* KRİTİK: Sohbet kutusu stilini güçlendiriyoruz */
         .input-area {
-            /* Input alanının görünürlüğünü garanti ediyoruz */
-            height: 70px; 
-            min-height: 70px; 
+            height: var(--input-height); 
+            min-height: var(--input-height); 
             background: #1f1f1f; 
             padding: 10px 20px; 
             box-shadow: 0 -2px 5px rgba(0,0,0,0.3); 
             z-index: 1000;
             display: flex; 
             align-items: center;
+            flex-shrink: 0; /* Küçülmesini engelle */
+            width: 100%;
+            box-sizing: border-box; /* Padding dahil boyutu koru */
         }
         .input-area input {
             flex-grow: 1; padding: 15px; border-radius: 25px; border: 1px solid #555;
@@ -654,6 +659,7 @@ HTML_TEMPLATE = """
             
             msgDiv.innerHTML = htmlContent;
             messagesDiv.appendChild(msgDiv);
+            // Scroll'u aşağı kaydır
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
 
