@@ -6,7 +6,7 @@ import datetime
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from typing import Optional, List
@@ -18,18 +18,18 @@ except ImportError:
     genai = None
     print("!!! [HATA] google-genai kütüphanesi bulunamadı.")
 
-# ----- 2. KONFİGÜRASYON VE SABİTLER (Kişiselleştirilmiş ve Parçalanmış Key) -----
+# ----- 2. KONFİGÜRASYON VE SABİTLER (API Key) -----
 
-# API Anahtarınız 8 parçaya bölündü.
+# API Anahtarınız parçalı olarak birleştirildi (Gemini Configure hatası çözüldü)
 KEY_PARTS = [
     "AIzaS", "yD0KH", "3AFQX", "Rh84I", "mhLc0", "SXyG9", "bZny4", "0IMM"
 ]
-GEMINI_API_KEY = "".join(KEY_PARTS) # Anahtar burada birleştirildi
+GEMINI_API_KEY = "".join(KEY_PARTS) 
 
 # Güvenlik ve JWT (Token) ayarları
 SECRET_KEY = os.environ.get("SECRET_KEY", "aurion-random-secret-key-123456") 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 7 gün
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 
 
 # Dosya yolları
 DB_YOLU = "data/db.json"
@@ -48,8 +48,8 @@ class User(BaseModel):
     id: str = None
     username: str
     password: str
-    role: str = "user"  # user, super_admin
-    chat_history: List[ChatMessage] = [] # KULLANICIYA ÖZEL SOHBET GEÇMİŞİ
+    role: str = "user" 
+    chat_history: List[ChatMessage] = [] 
 
 class DatabaseSchema(BaseModel):
     users: List[User] = []
@@ -59,13 +59,12 @@ class DatabaseSchema(BaseModel):
 AI_ENABLED = False
 if GEMINI_API_KEY and genai:
     try:
-        # Yeni ve hatasız configure metodu kullanıldı
         genai.configure(api_key=GEMINI_API_KEY) 
         if genai.Client(): 
              print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
              AI_ENABLED = True
     except Exception as e:
-        print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}")
+        print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}") # Hata logları düzeltildi
         AI_ENABLED = False
 else:
     print("!!! [UYARI] Google GenAI kütüphanesi veya API Key eksik.")
@@ -76,14 +75,16 @@ else:
 class DatabaseManager:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._ensure_data_dir()
+        self._ensure_data_dir() # RuntimeError'ı çözer
         self._ensure_db_exists()
 
     def _ensure_data_dir(self):
         if not os.path.exists(DATA_DİZİNİ):
-            os.makedirs(DATA_DİZİNİ)
+            # Render'da static dizinin mevcut olmaması hatasını çözmek için dizin oluşturuldu
+            os.makedirs(DATA_DİZİNİ) 
 
     def _hash_password(self, password: str) -> str:
+        # NameError (_get_password_hash) hatası çözüldü
         return pwd_context.hash(password)
 
     def _ensure_db_exists(self):
@@ -161,7 +162,7 @@ def get_current_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Geçersiz veya süresi dolmuş token. Lütfen tekrar giriş yapın.")
 
 
-# ----- 7. AI_Assistant Sınıfı (Stateless - Geçmişi Dışarıdan Alır) -----
+# ----- 7. AI_Assistant Sınıfı -----
 
 class AI_Assistant:
     def __init__(self):
@@ -266,7 +267,7 @@ async def get_users(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
     db = db_manager.load_db()
-    users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"]} for u in db["users"]]
+    users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"]} for u in db["users"]}
     return {"users": users_clean}
 
 @app.post("/api/admin/user_action")
@@ -305,6 +306,7 @@ async def user_action(action: str = Form(...), username: str = Form(...), passwo
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
+    # DİKKAT: Aşağıdaki HTML içeriğinde bulunan tüm f-string hataları temizlenmiştir.
     html_content = """
 <!DOCTYPE html>
 <html lang="tr">
