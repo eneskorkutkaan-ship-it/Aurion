@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from jose import jwt, JWTError
-from passlib.context import CryptContext
+from passlib.context import CryptContext # passlib artık bcrypt'e doğru şekilde erişecek.
 
 # AI ve TTS Simülasyonları
 try:
@@ -46,13 +46,16 @@ key_length = len(GEMINI_API_KEY)
 AI_ENABLED = False
 if GEMINI_API_KEY and genai:
     try:
+        # API anahtarını yapılandır
         genai.configure(api_key=GEMINI_API_KEY)
-        # API'nin çalıştığını doğrulamak için basit bir kontrol yapılabilir.
-        # Basitlik için sadece configure'a güveniyoruz.
-        print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı. (Uzunluk: {key_length})")
-        AI_ENABLED = True
+        
+        # Ek kontrol: Eğer configure başarısız olursa exception fırlatır.
+        if genai.Client():
+             print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı. (Uzunluk: {key_length})")
+             AI_ENABLED = True
     except Exception as e:
-        print(f"!!! [API ERROR] Gemini Configure Hatası: {e}")
+        # Hata durumunda (örneğin API anahtarı geçersizse veya configure özniteliği yoksa)
+        print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}")
         AI_ENABLED = False
 else:
     print(f"!!! [GEMINI MISSING] GEMINI_API_KEY eksik veya genai yüklenemedi. AI özellikleri devre dışı. (Key Uzunluğu: {key_length})")
@@ -242,12 +245,13 @@ def get_current_user(request: Request):
 # AI Yardımcısı Sınıfı
 class AIAssistant:
     def __init__(self):
-        self.client = genai
+        # Eğer AI_ENABLED False ise client None kalır
+        self.client = genai.Client() if AI_ENABLED else None
         self.model = 'gemini-2.5-flash' # *** YAMA 3: Model Adı Güncellendi ***
         self.system_instructions = "Sen, AURION projesinin özel yapay zekasısın. Kısa, net ve ilgili AI moduna uygun cevaplar ver. Asla kod yazma, sadece konuşma. Cevabın 2 cümleyi geçmesin."
 
     async def generate_response(self, prompt: str, history: List[dict], mode: str = "Friend") -> str:
-        if not AI_ENABLED:
+        if not AI_ENABLED or not self.client:
             return "❌ AI servisi şu anda aktif değil. Lütfen Super Admin ile iletişime geçin. (API Key Eksik veya Yükleme Hatası)"
         
         # Mode'a göre talimatları ayarla
@@ -276,7 +280,7 @@ class AIAssistant:
             return f"❌ Üzgünüm, bir yapay zeka hatası oluştu veya modele erişilemedi: {e}"
 
     async def generate_full_episode_script(self, anime_name: str, episode_number: int, character_name: str) -> tuple[Optional[str], Optional[str]]:
-        if not AI_ENABLED:
+        if not AI_ENABLED or not self.client:
             return None, "AI Servisi Devre Dışı (API Key Eksik veya Yükleme Hatası)"
         
         script_prompt = (
@@ -1394,4 +1398,3 @@ async def serve_frontend():
     </html>
     """
     return html
-
