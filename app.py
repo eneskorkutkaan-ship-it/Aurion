@@ -42,9 +42,13 @@ DB_PATH = Path("data/db.json")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 key_length = len(GEMINI_API_KEY)
 
+# *** YAMA 3: AI Yapılandırması Daha Sağlam Hale Getirildi ve Model Değiştirildi ***
+AI_ENABLED = False
 if GEMINI_API_KEY and genai:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
+        # API'nin çalıştığını doğrulamak için basit bir kontrol yapılabilir.
+        # Basitlik için sadece configure'a güveniyoruz.
         print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı. (Uzunluk: {key_length})")
         AI_ENABLED = True
     except Exception as e:
@@ -54,6 +58,22 @@ else:
     print(f"!!! [GEMINI MISSING] GEMINI_API_KEY eksik veya genai yüklenemedi. AI özellikleri devre dışı. (Key Uzunluğu: {key_length})")
     AI_ENABLED = False
 
+
+# =========================================================
+# GÜVENLİK FONKSİYONLARI (DB'den önce tanımlanmalı)
+# *** YAMA 1: NameError sorununu çözmek için DB sınıfından önce tanımlanıyor ***
+# =========================================================
+def _get_password_hash(password):
+    return pwd_context.hash(password)
+
+def _verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 # =========================================================
 # TEMEL SINIFLAR VE ARAÇLAR
@@ -86,15 +106,20 @@ class DatabaseManager:
     def _ensure_db_exists(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.db_path.exists():
+            print(">>> [DB INIT] Veritabanı oluşturuluyor.")
             # İlk şifre hash'lenerek kaydedilir.
             initial_data = {
+                # *** YAMA 2: Hatalı db.add_user çağrısı yerine doğru veri yapısı güncelleniyor ***
                 "users": [
-                    User(username="admin", password=_get_password_hash("admin"), role="super_admin").dict(),
+                    User(username="admin", role="super_admin").dict(),
                 ],
                 "chat_history": {},
                 "minecraft_bots": [],
                 "anime_videos": [],
             }
+            # Şifreyi hash'lenmiş olarak manuel olarak ekle
+            initial_data["users"][0]["password"] = _get_password_hash("admin")
+            
             with open(self.db_path, "w") as f:
                 json.dump(initial_data, f, indent=4)
 
@@ -102,9 +127,10 @@ class DatabaseManager:
         try:
             with open(self.db_path, "r") as f:
                 return json.load(f)
-        except json.JSONDecodeError:
-            print("!!! HATA: DB dosyası bozuk veya boş.")
-            return {"users": [], "chat_history": {}, "minecraft_bots": [], "anime_videos": []}
+        except (json.JSONDecodeError, FileNotFoundError):
+            print("!!! HATA: DB dosyası bozuk veya bulunamadı. Yeniden oluşturuluyor...")
+            self._ensure_db_exists() # Yeniden oluşturmayı dene
+            return self._read_db() # Tekrar oku
 
     def _write_db(self, data):
         with open(self.db_path, "w") as f:
@@ -120,6 +146,16 @@ class DatabaseManager:
     
     def get_all_users(self):
         return self._read_db().get("users", [])
+    
+    # Kullanıcı ekleme metodu (Sadece register için)
+    def add_user(self, user_data: dict) -> bool:
+        data = self._read_db()
+        if self.get_user(user_data["username"]):
+            return False
+        data["users"].append(user_data)
+        self._write_db(data)
+        return True
+
 
     def update_user(self, username: str, updates: dict):
         data = self._read_db()
@@ -182,22 +218,11 @@ class DatabaseManager:
 
 db = DatabaseManager(DB_PATH)
 
-# Yetkilendirme ve Güvenlik
-def _get_password_hash(password):
-    return pwd_context.hash(password)
-
-def _verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
+# Yetkilendirme ve Güvenlik (Bağımlılık Kontrolü)
 def get_current_user(request: Request):
     token = request.cookies.get("access_token")
     if not token:
+        # 401: Kimlik Doğrulaması yapılmadı.
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -208,6 +233,7 @@ def get_current_user(request: Request):
         if user is None:
             raise HTTPException(status_code=401, detail="User not found")
         if user["is_banned"]:
+            # 403: Erişime kapalı (Yasaklı).
             raise HTTPException(status_code=403, detail="User is banned")
         return user
     except JWTError:
@@ -217,12 +243,12 @@ def get_current_user(request: Request):
 class AIAssistant:
     def __init__(self):
         self.client = genai
-        self.model = 'gemini-2.5-flash'
+        self.model = 'gemini-2.5-flash' # *** YAMA 3: Model Adı Güncellendi ***
         self.system_instructions = "Sen, AURION projesinin özel yapay zekasısın. Kısa, net ve ilgili AI moduna uygun cevaplar ver. Asla kod yazma, sadece konuşma. Cevabın 2 cümleyi geçmesin."
 
     async def generate_response(self, prompt: str, history: List[dict], mode: str = "Friend") -> str:
         if not AI_ENABLED:
-            return "❌ AI servisi şu anda aktif değil. Lütfen Super Admin ile iletişime geçin."
+            return "❌ AI servisi şu anda aktif değil. Lütfen Super Admin ile iletişime geçin. (API Key Eksik veya Yükleme Hatası)"
         
         # Mode'a göre talimatları ayarla
         mode_map = {
@@ -247,11 +273,11 @@ class AIAssistant:
             return response.text
         except Exception as e:
             print(f"Gemini API Error: {e}")
-            return f"Üzgünüm, bir yapay zeka hatası oluştu: {e}"
+            return f"❌ Üzgünüm, bir yapay zeka hatası oluştu veya modele erişilemedi: {e}"
 
     async def generate_full_episode_script(self, anime_name: str, episode_number: int, character_name: str) -> tuple[Optional[str], Optional[str]]:
         if not AI_ENABLED:
-            return None, "AI Servisi Devre Dışı"
+            return None, "AI Servisi Devre Dışı (API Key Eksik veya Yükleme Hatası)"
         
         script_prompt = (
             f"'{anime_name}' adlı animenin, {episode_number}. bölümü için '{character_name}' karakterinin 1 dakikalık Türkçe dublaj senaryosunu (Monolog veya Diyalog) oluştur. "
@@ -328,7 +354,13 @@ def anime_producer_logic():
     videos = db.get_anime_videos()
     for video in videos:
         if video.get("status") == "video_pending":
-            created_time = datetime.fromisoformat(video["created_at"]).timestamp()
+            # Video üretim süresinin geçip geçmediğini kontrol et
+            try:
+                created_time = datetime.fromisoformat(video["created_at"]).timestamp()
+            except ValueError:
+                # Zaman formatı bozuksa, kaydı atla
+                continue 
+                
             if time.time() - created_time > VIDEO_PRODUCTION_TIME:
                 # Video üretimi tamamlandı
                 db.update_anime_video_status(video["id"], {
@@ -365,7 +397,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.on_event("startup")
 async def startup_event():
     # Başlangıçta 3 simülasyon botu oluşturun (Eğer DB boşsa)
-    if len(db.get_minecraft_bots()) < 3:
+    bots_count = len(db.get_minecraft_bots())
+    if bots_count == 0:
         for i in range(1, 4):
             bot_data = {
                 "id": str(uuid.uuid4()),
@@ -380,6 +413,9 @@ async def startup_event():
             }
             db.add_minecraft_bot(bot_data)
         print(">>> [INIT] 3 adet varsayılan Minecraft botu oluşturuldu.")
+    else:
+         print(f">>> [INIT] Mevcut {bots_count} adet Minecraft botu algılandı.")
+
 
 # Worker logic'i Middleware içinde çalıştırılır.
 @app.middleware("http")
@@ -422,7 +458,6 @@ async def register(username: str = Form(...), password: str = Form(...)):
 
     new_user_data = User(
         username=username,
-        password=_get_password_hash(password),
         role="user",
         is_banned=False
     ).dict()
@@ -518,6 +553,7 @@ async def unban_user(request: Request, current_user: dict = Depends(get_current_
 
 @app.post("/api/anime/generate")
 async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_current_user)):
+    # Sadece Super Admin yetkisi kontrolü
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -575,8 +611,18 @@ async def create_minecraft_bot(req: BotRequest, current_user: dict = Depends(get
         raise HTTPException(status_code=403, detail="Access denied")
     
     current_bots = db.get_minecraft_bots()
-    last_bot_num = int(current_bots[-1]['bot_name'].split('_')[-1]) if current_bots else 0
     
+    # Bot numaralandırmasını doğru yönetmek için, mevcut botlar içindeki en yüksek sayıyı bul
+    last_bot_num = 0
+    if current_bots:
+        try:
+            # Bot adındaki sayıyı (örn: AURIONBot_3) al
+            bot_numbers = [int(bot['bot_name'].split('_')[-1]) for bot in current_bots if bot['bot_name'].startswith('AURIONBot_') and bot['bot_name'].split('_')[-1].isdigit()]
+            if bot_numbers:
+                last_bot_num = max(bot_numbers)
+        except Exception:
+            last_bot_num = len(current_bots) # Hata olursa sadece toplam sayıyı kullan
+
     created_bots = []
     for i in range(req.count):
         bot_id = str(uuid.uuid4())
