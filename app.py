@@ -22,7 +22,7 @@ except ImportError:
 
 # API Anahtarınız parçalı olarak birleştirildi (Gemini Configure hatası çözüldü)
 KEY_PARTS = [
-    "AIzaS", "yD0KH", "3AFQX", "Rh84I", "mhLc0", "SXyG9", "bZny4", "0IMM"
+    "AIzaS", "yD0KH", "3AFQX", "Rh84I", "mhLc0", "SXyG9", "bZny4", "0IMM" # Buraya kendi anahtarınızı eklemelisiniz.
 ]
 GEMINI_API_KEY = "".join(KEY_PARTS) 
 
@@ -32,11 +32,11 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 
 
 # Dosya yolları
-DB_YOLU = "data/db.json"
 DATA_DİZİNİ = "data"
+DB_YOLU = os.path.join(DATA_DİZİNİ, "db.json")
 
 # Şifreleme (Bcrypt)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto") # bcrypt sürüm hatası requirements.txt ile çözülmeli
 
 # ----- 3. Pydantic Modelleri -----
 class ChatMessage(BaseModel):
@@ -64,7 +64,7 @@ if GEMINI_API_KEY and genai:
              print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
              AI_ENABLED = True
     except Exception as e:
-        print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}") # Hata logları düzeltildi
+        print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}")
         AI_ENABLED = False
 else:
     print("!!! [UYARI] Google GenAI kütüphanesi veya API Key eksik.")
@@ -113,6 +113,7 @@ class DatabaseManager:
         except Exception as e:
             print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}")
             try:
+                # Hata durumunda bozuk dosyayı silip yeniden oluşturmayı dene
                 os.remove(self.db_path)
                 self._ensure_db_exists()
                 return self.load_db()
@@ -198,7 +199,9 @@ ai_assistant = AI_Assistant()
 # ----- 8. UYGULAMA YÖNLENDİRMELERİ (API Endpoints) -----
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Render Static dosyaları okuyamazsa bu dizinler hata verebilir.
+if os.path.isdir("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.post("/api/login")
 async def login(username: str = Form(...), password: str = Form(...)):
@@ -267,7 +270,8 @@ async def get_users(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
     db = db_manager.load_db()
-    users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"]} for u in db["users"]}
+    # Kapanış Parantezi Hatası Düzeltildi
+    users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"]} for u in db["users"]] 
     return {"users": users_clean}
 
 @app.post("/api/admin/user_action")
@@ -306,7 +310,7 @@ async def user_action(action: str = Form(...), username: str = Form(...), passwo
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
-    # DİKKAT: Aşağıdaki HTML içeriğinde bulunan tüm f-string hataları temizlenmiştir.
+    # HTML içeriği F-string hatası çözülmüş şekilde buraya eklenmiştir.
     html_content = """
 <!DOCTYPE html>
 <html lang="tr">
@@ -872,7 +876,7 @@ async def serve_dashboard(request: Request):
                 
                 const response = await fetch('/api/chat', {
                     method: 'POST',
-                    body: formData
+                    body: new URLSearchParams(formData)
                 });
 
                 const data = await response.json();
