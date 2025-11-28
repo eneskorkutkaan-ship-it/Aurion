@@ -20,7 +20,7 @@ except ImportError:
 
 # ----- 2. KONFİGÜRASYON VE SABİTLER (Kişiselleştirilmiş ve Parçalanmış Key) -----
 
-# API Anahtarınız, kullanıcının isteği üzerine 8 parçaya bölündü.
+# API Anahtarınız 8 parçaya bölündü.
 KEY_PARTS = [
     "AIzaS", "yD0KH", "3AFQX", "Rh84I", "mhLc0", "SXyG9", "bZny4", "0IMM"
 ]
@@ -49,7 +49,7 @@ class User(BaseModel):
     username: str
     password: str
     role: str = "user"  # user, super_admin
-    chat_history: List[ChatMessage] = [] # KULLANICIYA ÖZEL SOHBET GEÇMİŞİ EKLENDİ
+    chat_history: List[ChatMessage] = [] # KULLANICIYA ÖZEL SOHBET GEÇMİŞİ
 
 class DatabaseSchema(BaseModel):
     users: List[User] = []
@@ -59,6 +59,7 @@ class DatabaseSchema(BaseModel):
 AI_ENABLED = False
 if GEMINI_API_KEY and genai:
     try:
+        # Yeni ve hatasız configure metodu kullanıldı
         genai.configure(api_key=GEMINI_API_KEY) 
         if genai.Client(): 
              print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
@@ -110,7 +111,6 @@ class DatabaseManager:
             return DatabaseSchema(**data).dict()
         except Exception as e:
             print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}")
-            # Veritabanı bozuksa yeniden oluşturmayı dene
             try:
                 os.remove(self.db_path)
                 self._ensure_db_exists()
@@ -179,7 +179,6 @@ class AI_Assistant:
                     {"role": role, "parts": [{"text": message["content"]}]}
                 )
             
-            # Güncel isteği ekle
             contents.append(
                 {"role": "user", "parts": [{"text": prompt}]}
             )
@@ -229,7 +228,6 @@ async def get_chat_history(current_user: dict = Depends(get_current_user)):
     if not user_record:
         raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
 
-    # Veritabanından kullanıcının sohbet geçmişini döndür
     return {"history": user_record.get("chat_history", [])}
 
 @app.post("/api/chat")
@@ -242,26 +240,20 @@ async def chat_message(request: Request, current_user: dict = Depends(get_curren
     if not user_message:
         raise HTTPException(status_code=400, detail="Mesaj boş olamaz")
 
-    # DB'yi yükle ve kullanıcıyı bul
     db = db_manager.load_db()
     user_index, user_record = next(((i, u) for i, u in enumerate(db["users"]) if u["username"] == user_name), (None, None))
     if user_record is None: raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
     
-    # Mevcut sohbet geçmişini al
     current_history = user_record.get("chat_history", [])
     
-    # Kullanıcı mesajını history'ye ekle
     user_msg_record = ChatMessage(sender="user", content=user_message).dict()
     current_history.append(user_msg_record)
     
-    # AI yanıtını al (Tüm geçmişi context olarak kullan)
     ai_response_content = ai_assistant.generate_response(current_history, user_message)
     
-    # AI yanıtını history'ye ekle
     ai_msg_record = ChatMessage(sender="ai", content=ai_response_content).dict()
     current_history.append(ai_msg_record)
     
-    # Güncellenmiş history'yi kullanıcı kaydına geri kaydet
     db["users"][user_index]["chat_history"] = current_history
     db_manager.save_db(db)
     
@@ -270,12 +262,10 @@ async def chat_message(request: Request, current_user: dict = Depends(get_curren
 
 @app.get("/api/admin/users")
 async def get_users(current_user: dict = Depends(get_current_user)):
-    """Tüm kullanıcıları listeler (Yalnızca Super Admin)."""
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
     db = db_manager.load_db()
-    # Şifre alanını güvenlik nedeniyle kaldır
     users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"]} for u in db["users"]]
     return {"users": users_clean}
 
@@ -315,7 +305,6 @@ async def user_action(action: str = Form(...), username: str = Form(...), passwo
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
-    # Ana sayfa HTML içeriği (GEREKLİ F-STRING DÜZELTMELERİ YAPILDI)
     html_content = """
 <!DOCTYPE html>
 <html lang="tr">
@@ -843,8 +832,7 @@ async def serve_dashboard(request: Request):
             
             try {
                 const response = await fetch('/api/chat_history');
-                if (response.status === 401) { // Eğer token süresi dolmuşsa
-                     // pass - kullanıcı zaten login kontrolünden geçeceği için burası genelde çalışmaz
+                if (response.status === 401) {
                      return; 
                 }
                 if (!response.ok) {
@@ -857,7 +845,6 @@ async def serve_dashboard(request: Request):
                 });
                 scrollToBottom();
             } catch (error) {
-                // Sadece login olmuşsa hata mesajı göster
                 if(getCookie('access_token')) {
                     addMessage('ai', 'Sohbet geçmişiniz yüklenirken hata oluştu.', true);
                 }
