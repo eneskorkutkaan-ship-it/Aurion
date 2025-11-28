@@ -1,6 +1,10 @@
 fastapi
-uvicorn[standard]
+uvicorn
 pydantic
+passlib
 python-jose
-passlib[bcrypt]
+python-multipart
+# passlib'in bcrypt hashleme şeması için gerekli
+bcrypt==4.1.2 
+# Gemini API
 google-genai
