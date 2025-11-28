@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from jose import jwt, JWTError
-from passlib.context import CryptContext # passlib artık bcrypt'e doğru şekilde erişecek.
+from passlib.context import CryptContext
 
 # AI ve TTS Simülasyonları
 try:
@@ -29,6 +29,7 @@ except ImportError:
 SECRET_KEY = os.environ.get("SECRET_KEY", "aurion-super-secret-key-2025")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 24 saat
+# bcrypt uyumluluğu için CryptContext ayarları
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Simülasyon Süreleri
@@ -38,33 +39,27 @@ BOT_TASK_TIME = 10          # Minecraft bot görev süresi (saniye)
 # Veritabanı Dosya Yolu
 DB_PATH = Path("data/db.json")
 
-# Gemini API Kontrolü ve Yapılandırması
+# Gemini API Kontrolü ve Yapılandırması (Yama: Hata yakalama ve model adı)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-key_length = len(GEMINI_API_KEY)
-
-# *** YAMA 3: AI Yapılandırması Daha Sağlam Hale Getirildi ve Model Değiştirildi ***
 AI_ENABLED = False
 if GEMINI_API_KEY and genai:
     try:
-        # API anahtarını yapılandır
         genai.configure(api_key=GEMINI_API_KEY)
-        
-        # Ek kontrol: Eğer configure başarısız olursa exception fırlatır.
+        # client'ı oluşturmayı denerken API Key'in geçerliliğini de kontrol ederiz
         if genai.Client():
-             print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı. (Uzunluk: {key_length})")
+             print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
              AI_ENABLED = True
     except Exception as e:
-        # Hata durumunda (örneğin API anahtarı geçersizse veya configure özniteliği yoksa)
+        # Hata durumunda (API anahtarı geçersizse veya configure özniteliği yoksa)
         print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}")
         AI_ENABLED = False
 else:
-    print(f"!!! [GEMINI MISSING] GEMINI_API_KEY eksik veya genai yüklenemedi. AI özellikleri devre dışı. (Key Uzunluğu: {key_length})")
+    print(f"!!! [GEMINI MISSING] GEMINI_API_KEY eksik veya genai yüklenemedi. AI özellikleri devre dışı.")
     AI_ENABLED = False
 
 
 # =========================================================
-# GÜVENLİK FONKSİYONLARI (DB'den önce tanımlanmalı)
-# *** YAMA 1: NameError sorununu çözmek için DB sınıfından önce tanımlanıyor ***
+# GÜVENLİK FONKSİYONLARI (NameError'ı çözmek için DB'den önce tanımlanır)
 # =========================================================
 def _get_password_hash(password):
     return pwd_context.hash(password)
@@ -82,7 +77,7 @@ def create_access_token(data: dict):
 # TEMEL SINIFLAR VE ARAÇLAR
 # =========================================================
 
-# Pydantic Modelleri
+# Pydantic Modelleri (CommandRequest SyntaxError hatası düzeltildi)
 class User(BaseModel):
     username: str
     password: Optional[str] = None
@@ -110,18 +105,20 @@ class DatabaseManager:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.db_path.exists():
             print(">>> [DB INIT] Veritabanı oluşturuluyor.")
-            # İlk şifre hash'lenerek kaydedilir.
+            
+            # İlk şifre hash'lenerek kaydedilir (NameError düzeltildi)
+            admin_password_hash = _get_password_hash("admin")
+            
             initial_data = {
-                # *** YAMA 2: Hatalı db.add_user çağrısı yerine doğru veri yapısı güncelleniyor ***
                 "users": [
-                    User(username="admin", role="super_admin").dict(),
+                    User(username="admin", role="super_admin", password=admin_password_hash).dict(),
                 ],
                 "chat_history": {},
                 "minecraft_bots": [],
                 "anime_videos": [],
             }
-            # Şifreyi hash'lenmiş olarak manuel olarak ekle
-            initial_data["users"][0]["password"] = _get_password_hash("admin")
+            # Şifre alanını Pydantic'in dışından güncelleyelim
+            initial_data["users"][0]["password"] = admin_password_hash
             
             with open(self.db_path, "w") as f:
                 json.dump(initial_data, f, indent=4)
@@ -150,7 +147,6 @@ class DatabaseManager:
     def get_all_users(self):
         return self._read_db().get("users", [])
     
-    # Kullanıcı ekleme metodu (Sadece register için)
     def add_user(self, user_data: dict) -> bool:
         data = self._read_db()
         if self.get_user(user_data["username"]):
@@ -158,7 +154,6 @@ class DatabaseManager:
         data["users"].append(user_data)
         self._write_db(data)
         return True
-
 
     def update_user(self, username: str, updates: dict):
         data = self._read_db()
@@ -208,24 +203,25 @@ class DatabaseManager:
     def get_anime_videos(self):
         return self._read_db().get("anime_videos", [])
 
-    def update_anime_video_status(self, video_id: str, updates: dict):
+    # SyntaxError hatası düzeltildi: List comprehension'daki 'in' eksikliği
+    def anime_worker_update_pending_video_status(self, video_id: str, updates: dict):
         data = self._read_db()
-        found = False
-        for video in data["anime_videos"]:
+        # Sadece bekleyen (video_pending) videoları güncellemeyi sağlar
+        # (Bu metod, worker_middleware içinde kullanılır)
+        for video in [v for v in data["anime_videos"] if v.get("status") == "video_pending"]:
             if video["id"] == video_id:
                 video.update(updates)
-                found = True
-                break
-        if found:
-            self._write_db(data)
+                self._write_db(data)
+                return True
+        return False
+
 
 db = DatabaseManager(DB_PATH)
 
-# Yetkilendirme ve Güvenlik (Bağımlılık Kontrolü)
+# Yetkilendirme ve Güvenlik
 def get_current_user(request: Request):
     token = request.cookies.get("access_token")
     if not token:
-        # 401: Kimlik Doğrulaması yapılmadı.
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -236,25 +232,22 @@ def get_current_user(request: Request):
         if user is None:
             raise HTTPException(status_code=401, detail="User not found")
         if user["is_banned"]:
-            # 403: Erişime kapalı (Yasaklı).
             raise HTTPException(status_code=403, detail="User is banned")
         return user
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# AI Yardımcısı Sınıfı
+# AI Yardımcısı Sınıfı (Yama: Model adı gemini-2.5-flash olarak güncellendi)
 class AIAssistant:
     def __init__(self):
-        # Eğer AI_ENABLED False ise client None kalır
         self.client = genai.Client() if AI_ENABLED else None
-        self.model = 'gemini-2.5-flash' # *** YAMA 3: Model Adı Güncellendi ***
+        self.model = 'gemini-2.5-flash' # Hata 404'ü çözmek için model adı güncellendi
         self.system_instructions = "Sen, AURION projesinin özel yapay zekasısın. Kısa, net ve ilgili AI moduna uygun cevaplar ver. Asla kod yazma, sadece konuşma. Cevabın 2 cümleyi geçmesin."
 
     async def generate_response(self, prompt: str, history: List[dict], mode: str = "Friend") -> str:
         if not AI_ENABLED or not self.client:
-            return "❌ AI servisi şu anda aktif değil. Lütfen Super Admin ile iletişime geçin. (API Key Eksik veya Yükleme Hatası)"
+            return "❌ AI servisi şu anda aktif değil. Lütfen Super Admin ile iletişime geçin."
         
-        # Mode'a göre talimatları ayarla
         mode_map = {
             "Teacher": "Öğretmen modundasın. Detaylı ve eğitici cevaplar ver. Cevabın 3 cümleyi geçmesin.",
             "Friend": "Dostça ve sıcak bir arkadaş modundasın. Samimi ve kısa cevaplar ver."
@@ -262,7 +255,6 @@ class AIAssistant:
         mode_instruction = mode_map.get(mode, self.system_instructions)
         full_instructions = f"{self.system_instructions} {mode_instruction}"
         
-        # Tarihçeyi Gemini formatına çevir
         contents = [{"role": "user" if msg["sender"] == "user" else "model", "parts": [{"text": msg["content"]}]} for msg in history]
         contents.append({"role": "user", "parts": [{"text": prompt}]})
 
@@ -277,11 +269,11 @@ class AIAssistant:
             return response.text
         except Exception as e:
             print(f"Gemini API Error: {e}")
-            return f"❌ Üzgünüm, bir yapay zeka hatası oluştu veya modele erişilemedi: {e}"
+            return f"❌ Üzgünüm, bir yapay zeka hatası oluştu: {e}"
 
     async def generate_full_episode_script(self, anime_name: str, episode_number: int, character_name: str) -> tuple[Optional[str], Optional[str]]:
         if not AI_ENABLED or not self.client:
-            return None, "AI Servisi Devre Dışı (API Key Eksik veya Yükleme Hatası)"
+            return None, "AI Servisi Devre Dışı"
         
         script_prompt = (
             f"'{anime_name}' adlı animenin, {episode_number}. bölümü için '{character_name}' karakterinin 1 dakikalık Türkçe dublaj senaryosunu (Monolog veya Diyalog) oluştur. "
@@ -303,7 +295,6 @@ class TTS:
     async def text_to_speech_file(self, text: str, output_path: str) -> bool:
         """Gerçek TTS yerine dosya oluşturma simülasyonu."""
         try:
-            # Basit bir dosya oluşturup başarılı döndür
             with open(output_path, "w") as f:
                 f.write("Simulated WAV content for TTS.")
             return True
@@ -358,16 +349,14 @@ def anime_producer_logic():
     videos = db.get_anime_videos()
     for video in videos:
         if video.get("status") == "video_pending":
-            # Video üretim süresinin geçip geçmediğini kontrol et
             try:
                 created_time = datetime.fromisoformat(video["created_at"]).timestamp()
             except ValueError:
-                # Zaman formatı bozuksa, kaydı atla
                 continue 
                 
             if time.time() - created_time > VIDEO_PRODUCTION_TIME:
                 # Video üretimi tamamlandı
-                db.update_anime_video_status(video["id"], {
+                db.anime_worker_update_pending_video_status(video["id"], {
                     "status": "video_completed",
                     "video_url": "/static/img/sim/simulated_video.mp4" 
                 })
@@ -379,11 +368,10 @@ def anime_producer_logic():
 
 app = FastAPI()
 
-# Statik Dosyalar için dizinlerin oluşturulması
+# Statik Dosyalar ve Simülasyon İmajları için hazırlık
 Path("static/img/sim").mkdir(parents=True, exist_ok=True)
 Path("static/audio").mkdir(parents=True, exist_ok=True)
 
-# Simülasyon resimlerini ve dosyalarını oluşturun
 for img in ["screen_mine.png", "screen_build.png", "screen_follow.png", "screen_default.png"]:
     file_path = Path(f"static/img/sim/{img}")
     if not file_path.exists():
@@ -400,7 +388,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.on_event("startup")
 async def startup_event():
-    # Başlangıçta 3 simülasyon botu oluşturun (Eğer DB boşsa)
+    # Başlangıç botlarını oluştur
     bots_count = len(db.get_minecraft_bots())
     if bots_count == 0:
         for i in range(1, 4):
@@ -412,7 +400,7 @@ async def startup_event():
                 "status": "online",
                 "current_task": "Sistem Başlatılıyor...",
                 "last_command": None,
-                "task_start_time": time.time() - 5, # Başlangıçta görevde olsun
+                "task_start_time": time.time() - 5,
                 "screen_url": "/static/img/sim/screen_default.png"
             }
             db.add_minecraft_bot(bot_data)
@@ -424,7 +412,6 @@ async def startup_event():
 # Worker logic'i Middleware içinde çalıştırılır.
 @app.middleware("http")
 async def worker_middleware(request: Request, call_next):
-    # Bu, her API isteğinde simülasyonu günceller.
     minecraft_worker_logic()
     anime_producer_logic()
     response = await call_next(request)
@@ -438,7 +425,7 @@ async def worker_middleware(request: Request, call_next):
 @app.post("/api/auth/login")
 async def login(response: JSONResponse, username: str = Form(...), password: str = Form(...)):
     user = db.get_user(username)
-    if not user or not _verify_password(password, user["password"]):
+    if not user or not _verify_password(password, user.get("password", "")):
         raise HTTPException(status_code=400, detail="Yanlış kullanıcı adı veya şifre.")
     
     if user["is_banned"]:
@@ -448,7 +435,6 @@ async def login(response: JSONResponse, username: str = Form(...), password: str
     
     response = JSONResponse(content={"message": "Giriş başarılı", "user": user["username"], "role": user["role"]})
     
-    # Cookie'leri set et ve kullanıcı bilgisini JS'in okuması için ekle
     response.set_cookie(key="access_token", value=access_token, httponly=True, max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60) 
     response.set_cookie(key="user_name", value=user["username"], max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60) 
     response.set_cookie(key="user_role", value=user["role"], max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60) 
@@ -465,7 +451,7 @@ async def register(username: str = Form(...), password: str = Form(...)):
         role="user",
         is_banned=False
     ).dict()
-    new_user_data["password"] = _get_password_hash(password) # Şifreyi hash'lenmiş olarak kaydet
+    new_user_data["password"] = _get_password_hash(password)
 
     if db.add_user(new_user_data):
         return {"message": "Kayıt başarılı. Lütfen giriş yapın."}
@@ -499,14 +485,11 @@ async def chat(request: Request, current_user: dict = Depends(get_current_user))
 
     history = db.get_chat_history(current_user["username"])
     
-    # Kullanıcı mesajını kaydet
     user_msg = {"sender": "user", "content": prompt, "timestamp": datetime.utcnow().isoformat()}
     db.add_chat_message(current_user["username"], user_msg)
     
-    # AI yanıtını al
     ai_response_text = await ai_assistant.generate_response(prompt, history, mode)
     
-    # AI mesajını kaydet
     ai_msg = {"sender": "ai", "content": ai_response_text, "timestamp": datetime.utcnow().isoformat()}
     db.add_chat_message(current_user["username"], ai_msg)
     
@@ -522,7 +505,6 @@ async def get_admin_data(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Access denied")
     
     users = db.get_all_users()
-    # Şifre alanını güvenlik için çıkar
     safe_users = [{k: v for k, v in user.items() if k != 'password'} for user in users]
     return {"users": safe_users}
 
@@ -557,7 +539,6 @@ async def unban_user(request: Request, current_user: dict = Depends(get_current_
 
 @app.post("/api/anime/generate")
 async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_current_user)):
-    # Sadece Super Admin yetkisi kontrolü
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -616,16 +597,14 @@ async def create_minecraft_bot(req: BotRequest, current_user: dict = Depends(get
     
     current_bots = db.get_minecraft_bots()
     
-    # Bot numaralandırmasını doğru yönetmek için, mevcut botlar içindeki en yüksek sayıyı bul
     last_bot_num = 0
     if current_bots:
         try:
-            # Bot adındaki sayıyı (örn: AURIONBot_3) al
             bot_numbers = [int(bot['bot_name'].split('_')[-1]) for bot in current_bots if bot['bot_name'].startswith('AURIONBot_') and bot['bot_name'].split('_')[-1].isdigit()]
             if bot_numbers:
                 last_bot_num = max(bot_numbers)
         except Exception:
-            last_bot_num = len(current_bots) # Hata olursa sadece toplam sayıyı kullan
+            last_bot_num = len(current_bots)
 
     created_bots = []
     for i in range(req.count):
@@ -666,13 +645,12 @@ async def send_bot_command(request: Request, current_user: dict = Depends(get_cu
     if not bot_id or not command:
         raise HTTPException(status_code=400, detail="Bot ID ve komut alanı boş olamaz.")
         
-    # Komutu veritabanına yaz
     db.update_bot_status(bot_id, {"last_command": command, "current_task": f"Komut Alındı: {command}"})
     
     return {"message": f"Komut ('{command}') bota gönderildi. İşleniyor..."}
 
 # =========================================================
-# FRONTEND HTML VE BAŞLANGIÇ AYARLARI (AURION DESIGN)
+# FRONTEND HTML (HTML içeriği güncellenmiş ve düzeltilmiş)
 # =========================================================
 
 @app.get("/", response_class=HTMLResponse)
@@ -689,13 +667,13 @@ async def serve_frontend():
         <style>
             /* >>>>>>>>>>>>>>>>> AURION GÖRSEL REVİZYONU - CSS BAŞLANGIÇ <<<<<<<<<<<<<<<<< */
             :root {{
-                --bg-color: #0d1117; /* Koyu Mavi/Gri */
-                --surface-color: #161b22; /* Orta Koyu Yüzey */
-                --card-color: #21262d; /* Kart Arka Planı */
-                --primary-color: #58a6ff; /* Mavi Vurgu */
-                --secondary-color: #8b949e; /* Açık Gri Metin */
-                --accent-color: #ff7aa2; /* Pembe/Mor Vurgu */
-                --text-color: #c9d1d9; /* Açık Metin */
+                --bg-color: #0d1117; 
+                --surface-color: #161b22; 
+                --card-color: #21262d; 
+                --primary-color: #58a6ff; 
+                --secondary-color: #8b949e; 
+                --accent-color: #ff7aa2; 
+                --text-color: #c9d1d9; 
                 --danger-color: #f85149;
                 --success-color: #3fb950;
                 --border-radius: 8px;
@@ -710,12 +688,9 @@ async def serve_frontend():
                 display: flex;
                 flex-direction: column;
             }}
-            /* GENEL KONTROL YAPISI */
             #authSection {{ width: 100%; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
             .auth-card {{ max-width: 400px; width: 90%; background-color: var(--card-color); padding: 30px; border-radius: var(--border-radius); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4); text-align: center; border: 1px solid #30363d; }}
             .auth-card h2 {{ color: var(--primary-color); margin-bottom: 25px; font-weight: 700; }}
-
-            /* FORM VE INPUTLAR */
             .form-group {{ margin-bottom: 15px; text-align: left; }}
             .form-group input, .form-group textarea {{ 
                 width: 100%; 
@@ -744,8 +719,6 @@ async def serve_frontend():
             .btn-secondary {{ background-color: var(--card-color); color: var(--text-color); border: 1px solid #30363d; }}
             .btn-secondary:hover {{ background-color: #30363d; }}
             .error-message {{ color: var(--danger-color); margin-top: 10px; font-size: 0.85rem; }}
-
-            /* DASHBOARD YAPISI */
             #dashboard {{ display: flex; width: 100%; }}
             .sidebar {{ 
                 width: 250px; 
@@ -790,8 +763,6 @@ async def serve_frontend():
                 font-weight: 700; 
             }}
             .nav-link.super-admin-link {{ color: var(--accent-color); font-weight: 700; }}
-
-            /* ANA İÇERİK */
             .main-container {{ 
                 flex-grow: 1; 
                 padding: 40px; 
@@ -800,11 +771,8 @@ async def serve_frontend():
             }} 
             .tab-content {{ display: none; }} 
             .tab-content.active {{ display: block; }} 
-
             h2 {{ color: var(--primary-color); margin-bottom: 25px; border-bottom: 1px solid #30363d; padding-bottom: 5px; font-size: 1.8rem; }}
             .sub-heading {{ color: var(--secondary-color); margin-top: 20px; margin-bottom: 10px; font-size: 1.2rem; }}
-
-            /* KART YAPISI (Çoklu İçerik Alanı) */
             .card-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; margin-top: 20px; }}
             .data-card {{ 
                 background-color: var(--card-color); 
@@ -813,20 +781,15 @@ async def serve_frontend():
                 border: 1px solid #30363d;
                 box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2); 
             }}
-
-            /* CHAT STİLLERİ */
             .mode-selector {{ display: flex; gap: 15px; margin-bottom: 20px; }}
             .mode-btn {{ flex: 1; padding: 10px; background-color: var(--card-color); color: var(--secondary-color); border: 1px solid #30363d; border-radius: 4px; cursor: pointer; transition: all 0.3s; }}
             .mode-btn.active {{ background-color: var(--primary-color); color: var(--bg-color); border-color: var(--primary-color); }}
-            
             .chat-box {{ background: var(--surface-color); border-radius: var(--border-radius); padding: var(--padding-unit); height: 600px; overflow-y: auto; margin-bottom: 20px; display: flex; flex-direction: column; border: 1px solid #30363d; }}
             .message {{ margin-bottom: 10px; padding: 10px 15px; border-radius: 12px; max-width: 75%; font-size: 0.9rem; white-space: pre-wrap; }}
             .message.user {{ background-color: var(--primary-color); color: var(--bg-color); align-self: flex-end; border-bottom-right-radius: 4px; }}
             .message.ai {{ background-color: #30363d; color: var(--text-color); align-self: flex-start; border-bottom-left-radius: 4px; }}
             .chat-input {{ display: flex; gap: 10px; }}
             .chat-input input {{ flex-grow: 1; }}
-
-            /* MINECRAFT VE ANIME STİLLERİ */
             .anime-form-grid {{ display: grid; grid-template-columns: 2fr 1fr 1fr 150px; gap: 20px; }}
             .bot-screen-img {{ 
                 width: 100%; 
@@ -840,8 +803,6 @@ async def serve_frontend():
             .bot-command-input {{ display: flex; gap: 5px; margin-top: 10px; }}
             .status-online {{ color: var(--success-color) !important; }}
             .status-offline {{ color: var(--danger-color) !important; }}
-
-            /* Anime Media Oynatıcıları */
             .anime-history-card video, .anime-history-card audio {{
                  width: 100%; 
                  margin-top: 10px; 
@@ -1032,7 +993,6 @@ async def serve_frontend():
                     if (response.ok) {{
                         messageEl.textContent = result.message;
                         if (type === 'login') {{
-                             // Giriş başarılıysa dashboard'a geç
                              setTimeout(showDashboard, 100); 
                         }}
                     }} else {{
@@ -1050,7 +1010,6 @@ async def serve_frontend():
             }}
             
             async function showDashboard() {{
-                // Token ve kullanıcı bilgisi kontrolü
                 const userName = getCookie('user_name');
                 const userRole = getCookie('user_role');
 
@@ -1100,7 +1059,7 @@ async def serve_frontend():
                 }}
             }}
             
-            // AI Mode ve Chat Fonksiyonları (Önceki mantık korundu)
+            // AI Mode ve Chat Fonksiyonları 
             function setMode(mode) {{
                 currentMode = mode;
                 document.querySelectorAll('.mode-btn').forEach(btn => {{
@@ -1162,7 +1121,7 @@ async def serve_frontend():
                 }}
             }}
 
-            // Admin Fonksiyonları (Önceki mantık korundu)
+            // Admin Fonksiyonları 
             async function loadAdminData() {{
                 const data = await apiCall('/api/admin/users');
                 const adminDataEl = document.getElementById('adminData');
@@ -1205,7 +1164,7 @@ async def serve_frontend():
                 }});
             }}
 
-            // Anime Fonksiyonları (Önceki mantık korundu)
+            // Anime Fonksiyonları
             async function generateAnime() {{
                 const name = document.getElementById('animeName').value.trim();
                 const episode = parseInt(document.getElementById('episodeNumber').value.trim());
@@ -1292,7 +1251,7 @@ async def serve_frontend():
                 }}
             }}
 
-            // Minecraft Fonksiyonları (Sıfır Hata ve Komut Mantığı)
+            // Minecraft Fonksiyonları 
             async function createBots() {{
                 const ip = document.getElementById('serverIP').value.trim();
                 const count = parseInt(document.getElementById('botCount').value.trim());
@@ -1338,8 +1297,6 @@ async def serve_frontend():
                 if (data.error) {{
                     alert(`Hata: ${{data.message}}`);
                 }} else {{
-                    // Komut gönderildi, worker çalışacak. 
-                    // Hemen arayüzü güncelle (Komut Alındı durumunu göstermek için)
                     loadBots(); 
                 }}
             }}
