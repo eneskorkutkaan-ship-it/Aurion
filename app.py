@@ -21,7 +21,6 @@ except ImportError:
 # ----- 2. KONFİGÜRASYON VE SABİTLER (Kişiselleştirilmiş ve Parçalanmış Key) -----
 
 # API Anahtarınız, kullanıcının isteği üzerine 8 parçaya bölündü.
-# DİKKAT: Bu gerçek bir güvenlik yöntemi değildir.
 KEY_PARTS = [
     "AIzaS", "yD0KH", "3AFQX", "Rh84I", "mhLc0", "SXyG9", "bZny4", "0IMM"
 ]
@@ -54,7 +53,6 @@ class User(BaseModel):
 
 class DatabaseSchema(BaseModel):
     users: List[User] = []
-    # Global 'chats' listesi kaldırıldı, tarihçeler artık User modelinde tutuluyor.
 
 # ----- 4. Gemini AI Yapılandırması ve Durumu -----
 
@@ -94,8 +92,7 @@ class DatabaseManager:
 
             initial_data = {
                 "users": [
-                    # ENES: Yeni varsayılan Super Admin
-                    User(id=str(uuid.uuid4()), username="enes", role="super_admin", password=admin_password_hash).dict(),
+                    User(id=str(uuid.uuid4()), username="enes", role="super_admin", password=admin_password_hash, chat_history=[]).dict(),
                 ]
             }
             try:
@@ -110,15 +107,20 @@ class DatabaseManager:
         try:
             with open(self.db_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Yüklenen veriyi Pydantic ile doğrula
             return DatabaseSchema(**data).dict()
         except Exception as e:
             print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}")
-            raise HTTPException(status_code=500, detail="Veritabanı hatası.")
+            # Veritabanı bozuksa yeniden oluşturmayı dene
+            try:
+                os.remove(self.db_path)
+                self._ensure_db_exists()
+                return self.load_db()
+            except Exception:
+                raise HTTPException(status_code=500, detail="Veritabanı hatası.")
+
 
     def save_db(self, data: dict):
         try:
-            # Kaydetmeden önce Pydantic ile doğrula
             DatabaseSchema(**data) 
             with open(self.db_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
@@ -145,7 +147,6 @@ def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] 
 
 # JWT Kontrolü için kullanılan bağımlılık fonksiyonu
 def get_current_user(request: Request) -> dict:
-    """JWT token'ı kullanarak mevcut kullanıcının kimliğini ve rolünü doğrular."""
     token = request.cookies.get("access_token")
     if not token:
         raise HTTPException(status_code=401, detail="Yetkilendirme token'ı eksik.")
@@ -166,16 +167,13 @@ class AI_Assistant:
     def __init__(self):
         self.client = genai.Client() if AI_ENABLED else None
     
-    # Kullanıcının tüm geçmişini alıp, yeni mesajla birlikte gönderir
     def generate_response(self, history: List[dict], prompt: str) -> str:
         if not AI_ENABLED or not self.client:
             return "AI servisi şu anda aktif değil. Lütfen Super Admin ile iletişime geçin."
 
         try:
-            # History'den API'nin beklediği 'contents' formatını oluşturma
             contents = []
             for message in history:
-                # 'user' gönderenler 'user' rolüne, 'ai' gönderenler 'model' rolüne maplenir
                 role = "user" if message["sender"] == "user" else "model"
                 contents.append(
                     {"role": role, "parts": [{"text": message["content"]}]}
@@ -187,7 +185,7 @@ class AI_Assistant:
             )
 
             response = self.client.models.generate_content(
-                model='gemini-2.5-flash', # Çalışan model
+                model='gemini-2.5-flash',
                 contents=contents
             )
             return response.text
@@ -222,7 +220,6 @@ async def login(username: str = Form(...), password: str = Form(...)):
     response.set_cookie(key="user_role", value=user_record["role"], httponly=False)
     return response
 
-# KULLANICIYA ÖZEL SOHBET GEÇMİŞİ YÜKLEME ENDPOINT'İ EKLENDİ
 @app.get("/api/chat_history")
 async def get_chat_history(current_user: dict = Depends(get_current_user)):
     user_name = current_user["username"]
@@ -274,19 +271,16 @@ async def chat_message(request: Request, current_user: dict = Depends(get_curren
 @app.get("/api/admin/users")
 async def get_users(current_user: dict = Depends(get_current_user)):
     """Tüm kullanıcıları listeler (Yalnızca Super Admin)."""
-    # Yetkilendirme kontrolü JWT ile yapılıyor
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
     db = db_manager.load_db()
-    # Şifre alanını güvenlik nedeniyle kaldırma
+    # Şifre alanını güvenlik nedeniyle kaldır
     users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"]} for u in db["users"]]
     return {"users": users_clean}
 
-# SADECE SUPER ADMIN İÇİN KULLANICI EKLEME/SİLME FONKSİYONLARI 
 @app.post("/api/admin/user_action")
 async def user_action(action: str = Form(...), username: str = Form(...), password: Optional[str] = Form(None), role: Optional[str] = Form("user"), current_user: dict = Depends(get_current_user)):
-    # Yetkilendirme kontrolü JWT ile yapılıyor
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
@@ -298,19 +292,16 @@ async def user_action(action: str = Form(...), username: str = Form(...), passwo
         if any(u["username"] == username for u in db["users"]):
             raise HTTPException(status_code=400, detail="Bu kullanıcı adı zaten mevcut.")
         
-        # Yeni kullanıcı ekle
         hashed_password = pwd_context.hash(password)
-        # Yeni kullanıcı varsayılan olarak boş bir chat_history ile eklenir
         new_user = User(id=str(uuid.uuid4()), username=username, password=hashed_password, role=role, chat_history=[]).dict()
         db["users"].append(new_user)
         db_manager.save_db(db)
         return {"status": "success", "message": f"Kullanıcı '{username}' ({role}) başarıyla eklendi."}
 
     elif action == "delete":
-        if username == "enes": # Super admin'i silmeyi engelle
+        if username == "enes": 
             raise HTTPException(status_code=403, detail="Varsayılan Super Admin silinemez.")
         
-        # Kullanıcıyı sil
         initial_count = len(db["users"])
         db["users"] = [u for u in db["users"] if u["username"] != username]
         if len(db["users"]) == initial_count:
@@ -324,8 +315,8 @@ async def user_action(action: str = Form(...), username: str = Form(...), passwo
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
-    # Ana sayfa HTML içeriği
-    html_content = f"""
+    # Ana sayfa HTML içeriği (GEREKLİ F-STRING DÜZELTMELERİ YAPILDI)
+    html_content = """
 <!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -333,8 +324,7 @@ async def serve_dashboard(request: Request):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Gelişmiş Cevap Motoru</title>
     <style>
-        /* CSS kodları önceki haliyle aynı */
-        :root {{
+        :root {
             --bg-dark: #1e1e2d;
             --bg-light: #27293d;
             --text-light: #e0e0e0;
@@ -343,22 +333,22 @@ async def serve_dashboard(request: Request):
             --secondary: #ff5d9e;
             --border-color: #3f405c;
             --input-bg: #19192b;
-        }}
-        * {{
+        }
+        * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }}
-        body {{
+        }
+        body {
             background-color: var(--bg-dark);
             color: var(--text-light);
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
-        }}
-        #authSection, #dashboard {{
+        }
+        #authSection, #dashboard {
             border-radius: 12px;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
             padding: 40px;
@@ -368,19 +358,19 @@ async def serve_dashboard(request: Request):
             display: none;
             flex-direction: column;
             gap: 20px;
-        }}
-        h1 {{
+        }
+        h1 {
             color: var(--primary);
             text-align: center;
             font-size: 28px;
             margin-bottom: 20px;
-        }}
-        form {{
+        }
+        form {
             display: flex;
             flex-direction: column;
             gap: 15px;
-        }}
-        input[type="text"], input[type="password"] {{
+        }
+        input[type="text"], input[type="password"] {
             padding: 12px;
             border: 1px solid var(--border-color);
             border-radius: 8px;
@@ -388,12 +378,12 @@ async def serve_dashboard(request: Request):
             color: var(--text-light);
             font-size: 16px;
             transition: border-color 0.3s;
-        }}
-        input[type="text"]:focus, input[type="password"]:focus {{
+        }
+        input[type="text"]:focus, input[type="password"]:focus {
             border-color: var(--primary);
             outline: none;
-        }}
-        button {{
+        }
+        button {
             padding: 12px;
             border: none;
             border-radius: 8px;
@@ -402,11 +392,11 @@ async def serve_dashboard(request: Request):
             font-size: 16px;
             cursor: pointer;
             transition: background-color 0.3s;
-        }}
-        button:hover {{
+        }
+        button:hover {
             background-color: #4b4bd8;
-        }}
-        #dashboard {{
+        }
+        #dashboard {
             max-width: 1200px;
             height: 90vh;
             display: grid;
@@ -415,23 +405,23 @@ async def serve_dashboard(request: Request):
             gap: 0;
             overflow: hidden;
             background-color: var(--bg-dark);
-        }}
-        #sidebar {{
+        }
+        #sidebar {
             background-color: var(--bg-light);
             padding: 20px 0;
             display: flex;
             flex-direction: column;
             gap: 10px;
             border-right: 1px solid var(--border-color);
-        }}
-        .menu-header {{
+        }
+        .menu-header {
             padding: 0 20px 20px;
             font-size: 24px;
             font-weight: bold;
             color: var(--secondary);
             text-align: center;
-        }}
-        .nav-link {{
+        }
+        .nav-link {
             padding: 12px 20px;
             display: flex;
             align-items: center;
@@ -440,12 +430,12 @@ async def serve_dashboard(request: Request):
             transition: background-color 0.2s, color 0.2s;
             color: var(--text-muted);
             font-size: 16px;
-        }}
-        .nav-link:hover, .nav-link.active {{
+        }
+        .nav-link:hover, .nav-link.active {
             background-color: var(--border-color);
             color: var(--text-light);
-        }}
-        #userInfo {{
+        }
+        #userInfo {
             padding: 10px 20px;
             border-top: 1px solid var(--border-color);
             margin-top: auto;
@@ -454,166 +444,166 @@ async def serve_dashboard(request: Request):
             align-items: center;
             color: var(--text-muted);
             font-size: 14px;
-        }}
-        #logoutButton {{
+        }
+        #logoutButton {
             background-color: #dc3545;
             padding: 8px 15px;
             font-size: 14px;
-        }}
-        #logoutButton:hover {{
+        }
+        #logoutButton:hover {
             background-color: #c82333;
-        }}
-        #content {{
+        }
+        #content {
             padding: 20px;
             display: flex;
             flex-direction: column;
             overflow-y: auto;
-        }}
-        .tab-content {{
+        }
+        .tab-content {
             display: none;
             flex-direction: column;
             height: 100%;
-        }}
-        .tab-content.active {{
+        }
+        .tab-content.active {
             display: flex;
-        }}
-        #chatContent {{
+        }
+        #chatContent {
             flex-grow: 1;
             overflow-y: auto;
             padding: 10px;
             border-bottom: 1px solid var(--border-color);
             margin-bottom: 15px;
-        }}
-        .message {{
+        }
+        .message {
             margin-bottom: 15px;
             max-width: 80%;
             padding: 10px 15px;
             border-radius: 18px;
             line-height: 1.5;
-        }}
-        .user-message {{
+        }
+        .user-message {
             background-color: var(--primary);
             color: white;
             align-self: flex-end;
             margin-left: auto;
             border-bottom-right-radius: 2px;
-        }}
-        .ai-message {{
+        }
+        .ai-message {
             background-color: var(--bg-light);
             color: var(--text-light);
             align-self: flex-start;
             border: 1px solid var(--border-color);
             border-bottom-left-radius: 2px;
-        }}
-        #chatForm {{
+        }
+        #chatForm {
             display: flex;
             gap: 10px;
             padding-bottom: 10px;
-        }}
-        #chatInput {{
+        }
+        #chatInput {
             flex-grow: 1;
             padding: 12px;
             border-radius: 25px;
             background-color: var(--input-bg);
             border: 1px solid var(--border-color);
             color: var(--text-light);
-        }}
-        #chatSendBtn {{
+        }
+        #chatSendBtn {
             width: 100px;
             border-radius: 25px;
             background-color: var(--secondary);
-        }}
-        #chatSendBtn:hover {{
+        }
+        #chatSendBtn:hover {
             background-color: #e04a85;
-        }}
-        .tab-title {{
+        }
+        .tab-title {
             font-size: 24px;
             margin-bottom: 20px;
             color: var(--primary);
-        }}
-        .admin-section {{
+        }
+        .admin-section {
             margin-bottom: 30px;
             padding: 20px;
             background-color: var(--bg-light);
             border-radius: 8px;
-        }}
-        .admin-section h3 {{
+        }
+        .admin-section h3 {
             color: var(--secondary);
             margin-bottom: 15px;
             border-bottom: 1px solid var(--border-color);
             padding-bottom: 10px;
-        }}
-        .admin-form {{
+        }
+        .admin-form {
             display: flex;
             gap: 10px;
             align-items: center;
-        }}
-        .admin-form input, .admin-form select {{
+        }
+        .admin-form input, .admin-form select {
             padding: 10px;
             border-radius: 6px;
             border: 1px solid var(--border-color);
             background-color: var(--input-bg);
             color: var(--text-light);
-        }}
-        .admin-form button {{
+        }
+        .admin-form button {
             padding: 10px 15px;
             white-space: nowrap;
-        }}
-        #userList {{
+        }
+        #userList {
             list-style: none;
             padding: 0;
             margin-top: 15px;
-        }}
-        #userList li {{
+        }
+        #userList li {
             display: flex;
             justify-content: space-between;
             align-items: center;
             padding: 10px 0;
             border-bottom: 1px dashed var(--border-color);
-        }}
-        #userList li:last-child {{
+        }
+        #userList li:last-child {
             border-bottom: none;
-        }}
-        .delete-btn {{
+        }
+        .delete-btn {
             background-color: #dc3545;
             padding: 5px 10px;
-        }}
-        .delete-btn:hover {{
+        }
+        .delete-btn:hover {
             background-color: #c82333;
-        }}
+        }
 
-        @media (max-width: 768px) {{
-            #dashboard {{
+        @media (max-width: 768px) {
+            #dashboard {
                 grid-template-columns: 1fr;
                 grid-template-rows: 60px 1fr;
                 height: 100vh;
                 max-width: none;
-            }}
-            #sidebar {{
+            }
+            #sidebar {
                 flex-direction: row;
                 justify-content: space-around;
                 align-items: center;
                 border-right: none;
                 border-bottom: 1px solid var(--border-color);
                 padding: 0;
-            }}
-            .menu-header, #userInfo {{
+            }
+            .menu-header, #userInfo {
                 display: none;
-            }}
-            .nav-link {{
+            }
+            .nav-link {
                 padding: 10px;
                 gap: 5px;
                 flex-direction: column;
                 font-size: 12px;
                 text-align: center;
-            }}
-            .nav-link span {{
+            }
+            .nav-link span {
                 display: none;
-            }}
-            #content {{
+            }
+            #content {
                 padding: 10px;
-            }}
-        }}
+            }
+        }
     </style>
 </head>
 <body>
@@ -706,65 +696,61 @@ async def serve_dashboard(request: Request):
     </section>
 
     <script>
-        // ----- Yardımcı Fonksiyonlar -----
-
-        function getCookie(name) {{
+        function getCookie(name) {
             const nameEQ = name + "=";
             const ca = document.cookie.split(';');
-            for(let i = 0; i < ca.length; i++) {{
+            for(let i = 0; i < ca.length; i++) {
                 let c = ca[i];
                 while (c.charAt(0) === ' ') c = c.substring(1, c.length);
                 if (c.indexOf(nameEQ) === 0) return c.substring(nameEQ.length, c.length);
-            }}
+            }
             return null;
-        }}
+        }
 
-        function deleteCookie(name) {{
+        function deleteCookie(name) {
             document.cookie = name + '=; Max-Age=-99999999; path=/';
-        }}
+        }
 
-        function switchTab(tabId) {{
+        function switchTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
             const targetTab = document.getElementById(tabId);
-            if(targetTab) {{
+            if(targetTab) {
                 targetTab.classList.add('active');
-            }}
+            }
             
             document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
-            const targetLink = document.querySelector(`.nav-link[data-tab="${{tabId}}"]`);
-            if(targetLink) {{
+            const targetLink = document.querySelector(`.nav-link[data-tab="${tabId}"]`);
+            if(targetLink) {
                 targetLink.classList.add('active');
-            }}
+            }
             
-            if (tabId === 'admin') {{
+            if (tabId === 'admin') {
                 loadUserList();
-            }} else if (tabId === 'chat') {{
-                loadChatHistory(); // Chat sekmesi açıldığında geçmişi yükle
-            }}
-        }}
+            } else if (tabId === 'chat') {
+                loadChatHistory();
+            }
+        }
 
-        // ----- Kullanıcı Arayüzü Yönetimi -----
-
-        function updateMenuVisibility(userRole) {{
+        function updateMenuVisibility(userRole) {
             const adminTabs = ['admin', 'minecraft', 'anime']; 
             
-            adminTabs.forEach(tab => {{
-                const link = document.querySelector(`.nav-link[data-tab="${{tab}}"]`);
-                if (link) {{
-                    if (userRole !== 'super_admin') {{
+            adminTabs.forEach(tab => {
+                const link = document.querySelector(`.nav-link[data-tab="${tab}"]`);
+                if (link) {
+                    if (userRole !== 'super_admin') {
                         link.style.display = 'none';
-                    }} else {{
+                    } else {
                         link.style.display = 'flex';
-                    }}
-                }}
-            }});
-        }}
+                    }
+                }
+            });
+        }
 
-        async function showDashboard() {{
+        async function showDashboard() {
             const userName = getCookie('user_name');
             const userRole = getCookie('user_role');
 
-            if (userName && userRole) {{
+            if (userName && userRole) {
                 document.getElementById('authSection').style.display = 'none';
                 document.getElementById('dashboard').style.display = 'grid';
                 
@@ -773,64 +759,66 @@ async def serve_dashboard(request: Request):
 
                 updateMenuVisibility(userRole); 
 
-                switchTab('chat'); // Her zaman chat sekmesinde başla ve geçmişi yükle
-            } else {{
+                switchTab('chat');
+            } else {
                 document.getElementById('authSection').style.display = 'flex';
                 document.getElementById('dashboard').style.display = 'none';
-            }}
-        }}
+            }
+        }
 
-        function logout() {{
+        function logout() {
             deleteCookie('access_token');
             deleteCookie('user_name');
             deleteCookie('user_role');
             window.location.reload();
-        }}
+        }
 
-        // ----- Login İşlemi -----
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {{
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const form = e.target;
             const formData = new FormData(form);
-            const response = await fetch('/api/login', {{
-                method: 'POST',
-                body: new URLSearchParams(formData)
-            }});
-            if (response.redirected) {{
-                window.location.href = response.url;
-            }} else {{
-                const error = await response.json();
-                alert('Giriş Hatası: ' + error.detail);
-            }}
-        }});
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    body: new URLSearchParams(formData)
+                });
+                if (response.redirected) {
+                    window.location.href = response.url;
+                } else {
+                    const error = await response.json();
+                    alert('Giriş Hatası: ' + error.detail);
+                }
+            } catch (error) {
+                 alert('Bağlantı Hatası: Sunucuya ulaşılamıyor.');
+            }
+        });
         
         // ----- Sohbet İşlemleri -----
 
-        function scrollToBottom() {{
+        function scrollToBottom() {
             const chatContent = document.getElementById('chatContent');
             chatContent.scrollTop = chatContent.scrollHeight;
-        }}
+        }
         
-        // Sohbet baloncuğu ekle
-        function addMessage(sender, content, isError = false, shouldScroll = true) {{
+        function addMessage(sender, content, isError = false, shouldScroll = true) {
             const chatContent = document.getElementById('chatContent');
             const messageDiv = document.createElement('div');
             messageDiv.classList.add('message');
             messageDiv.classList.add(sender === 'user' ? 'user-message' : 'ai-message');
             
-            if (isError) {{
+            if (isError) {
                  messageDiv.style.backgroundColor = '#dc3545';
                  messageDiv.style.color = 'white';
-            }}
+            }
 
             messageDiv.textContent = content;
             chatContent.appendChild(messageDiv);
-            if (shouldScroll) {{
+            if (shouldScroll) {
                 scrollToBottom();
-            }}
-        }}
+            }
+        }
         
-        function addLoadingMessage() {{
+        function addLoadingMessage() {
             const chatContent = document.getElementById('chatContent');
             const loadingId = 'loading-' + Date.now();
             const messageDiv = document.createElement('div');
@@ -840,41 +828,45 @@ async def serve_dashboard(request: Request):
             chatContent.appendChild(messageDiv);
             scrollToBottom();
             return loadingId;
-        }}
+        }
 
-        function removeMessage(id) {{
+        function removeMessage(id) {
             const element = document.getElementById(id);
-            if (element) {{
+            if (element) {
                 element.remove();
-            }}
-        }}
+            }
+        }
         
-        // Kullanıcıya özel geçmişi yükle
-        async function loadChatHistory() {{
+        async function loadChatHistory() {
             const chatContent = document.getElementById('chatContent');
-            chatContent.innerHTML = ''; // Önce temizle
+            chatContent.innerHTML = '';
             
-            try {{
+            try {
                 const response = await fetch('/api/chat_history');
-                if (!response.ok) {{
+                if (response.status === 401) { // Eğer token süresi dolmuşsa
+                     // pass - kullanıcı zaten login kontrolünden geçeceği için burası genelde çalışmaz
+                     return; 
+                }
+                if (!response.ok) {
                     throw new Error("Geçmiş yüklenemedi.");
-                }}
+                }
                 const data = await response.json();
                 
-                data.history.forEach(msg => {{
-                    // Tarihçe yüklenirken scroll yapma, en sonda bir kere yap
+                data.history.forEach(msg => {
                     addMessage(msg.sender, msg.content, false, false); 
-                }});
+                });
                 scrollToBottom();
-            }} catch (error) {{
-                addMessage('ai', 'Sohbet geçmişiniz yüklenirken hata oluştu.', true);
+            } catch (error) {
+                // Sadece login olmuşsa hata mesajı göster
+                if(getCookie('access_token')) {
+                    addMessage('ai', 'Sohbet geçmişiniz yüklenirken hata oluştu.', true);
+                }
                 console.error('Chat history error:', error);
-            }}
-        }}
+            }
+        }
 
 
-        // Sohbet formunu gönder
-        document.getElementById('chatForm').addEventListener('submit', async (e) => {{
+        document.getElementById('chatForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const input = document.getElementById('chatInput');
             const message = input.value.trim();
@@ -885,129 +877,131 @@ async def serve_dashboard(request: Request):
             
             const loadingMsgId = addLoadingMessage();
             
-            try {{
+            try {
                 const formData = new FormData();
                 formData.append('message', message);
                 
-                const response = await fetch('/api/chat', {{
+                const response = await fetch('/api/chat', {
                     method: 'POST',
                     body: formData
-                }});
+                });
 
                 const data = await response.json();
                 
                 removeMessage(loadingMsgId);
                 
-                addMessage('ai', data.ai_response);
+                if (response.ok) {
+                    addMessage('ai', data.ai_response);
+                } else {
+                    addMessage('ai', 'API Hatası: ' + data.detail, true);
+                }
                 
-            }} catch (error) {{
+            } catch (error) {
                 removeMessage(loadingMsgId);
                 addMessage('ai', 'Bağlantı veya sunucu hatası oluştu.', true);
                 console.error('Chat error:', error);
-            }}
-        }});
+            }
+        });
         
         // ----- Admin Panel İşlemleri -----
 
-        async function loadUserList() {{
+        async function loadUserList() {
             const userListElement = document.getElementById('userList');
             const adminMsg = document.getElementById('adminMessage');
             userListElement.innerHTML = '';
             adminMsg.textContent = 'Kullanıcılar yükleniyor...';
 
-            try {{
+            try {
                 const response = await fetch('/api/admin/users');
                 const result = await response.json();
 
-                if (response.status === 403) {{
-                    userListElement.innerHTML = '<li>Bu bölüme erişim yetkiniz yok.</li>';
+                if (response.status === 403) {
+                    userListElement.innerHTML = '<li>Bu bölüme erişim yetkiniz yok. (Super Admin değilsiniz)</li>';
                     adminMsg.textContent = result.detail || 'Erişim Hatası.';
                     return;
-                }}
+                }
                 
-                if (!response.ok) {{
+                if (!response.ok) {
                     adminMsg.textContent = result.detail || 'Kullanıcı listesi yüklenirken bilinmeyen hata oluştu.';
                     return;
-                }}
+                }
                 
                 const users = result.users || [];
-                adminMsg.textContent = `Toplam ${{users.length}} kullanıcı bulundu.`;
+                adminMsg.textContent = `Toplam ${users.length} kullanıcı bulundu.`;
 
-                users.forEach(user => {{
+                users.forEach(user => {
                     const li = document.createElement('li');
                     li.innerHTML = `
-                        <span>${{user.username}} (${{user.role}})</span>
-                        <button class="delete-btn" data-username="${{user.username}}">Sil</button>
+                        <span>${user.username} (${user.role})</span>
+                        <button class="delete-btn" data-username="${user.username}">Sil</button>
                     `;
                     userListElement.appendChild(li);
-                }});
+                });
 
-                userListElement.querySelectorAll('.delete-btn').forEach(button => {{
-                    button.addEventListener('click', async (e) => {{
+                userListElement.querySelectorAll('.delete-btn').forEach(button => {
+                    button.addEventListener('click', async (e) => {
                         const usernameToDelete = e.target.getAttribute('data-username');
-                        if (usernameToDelete === 'enes') {{
+                        if (usernameToDelete === 'enes') {
                              alert('Varsayılan Super Admin silinemez.');
                              return;
-                        }}
-                        if (confirm(`Kullanıcı ${{usernameToDelete}} silinsin mi?`)) {{
+                        }
+                        if (confirm(`Kullanıcı ${usernameToDelete} silinsin mi?`)) {
                             await deleteUser(usernameToDelete);
-                        }}
-                    }});
-                }});
+                        }
+                    });
+                });
 
 
-            } catch (error) {{
+            } catch (error) {
                 adminMsg.textContent = 'Kullanıcı listesi yüklenirken ağ hatası oluştu.';
                 console.error('Kullanıcı listesi hatası:', error);
-            }}
-        }}
+            }
+        }
 
-        // Kullanıcı Ekleme Formu
-        document.getElementById('addUserForm').addEventListener('submit', async (e) => {{
+        document.getElementById('addUserForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const form = e.target;
             const formData = new FormData(form);
             formData.append('action', 'add');
             
-            const response = await fetch('/api/admin/user_action', {{
+            const response = await fetch('/api/admin/user_action', {
                 method: 'POST',
                 body: new URLSearchParams(formData)
-            }});
+            });
 
             const result = await response.json();
             document.getElementById('adminMessage').textContent = result.message || result.detail;
-            if (response.ok) {{
+            if (response.ok) {
                 form.reset();
                 loadUserList();
-            }} else {{
+            } else {
                  alert('Hata: ' + result.detail);
-            }}
-        }});
+            }
+        });
 
-        // Kullanıcı Silme İşlemi
-        async function deleteUser(username) {{
+        async function deleteUser(username) {
             const formData = new FormData();
             formData.append('action', 'delete');
             formData.append('username', username);
 
-            const response = await fetch('/api/admin/user_action', {{
+            const response = await fetch('/api/admin/user_action', {
                 method: 'POST',
                 body: new URLSearchParams(formData)
-            }});
+            });
 
             const result = await response.json();
             document.getElementById('adminMessage').textContent = result.message || result.detail;
-            if (response.ok) {{
+            if (response.ok) {
                 loadUserList();
-            }} else {{
+            } else {
                 alert('Silme Hatası: ' + result.detail);
-            }}
-        }}
+            }
+        }
 
         window.onload = showDashboard;
         
     </script>
 </body>
 </html>
-    """
+"""
     return HTMLResponse(content=html_content, status_code=200)
