@@ -57,11 +57,15 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY and genai:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
+        print(">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
     except Exception as e:
         print(f"!!! [API ERROR] Gemini Configure Hatası: {e}")
+else:
+    print("!!! [GEMINI MISSING] GEMINI_API_KEY ortam değişkeni eksik.")
 
 # ====== DATABASE (ASENKRON GÜVENLİ) ======
 class Database:
+    # ... (Database sınıfının içi, önceki revizyondan aynı kalır) ...
     def __init__(self):
         self.data = self.load_sync()
         
@@ -203,8 +207,7 @@ class Database:
         return [v for v in self.data["anime_videos"] if v["created_by"] == username]
 
 db = Database()
-
-# ====== SECURITY & AUTH ======
+# ====== SECURITY & AUTH (Aynı Kaldı) ======
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
@@ -243,8 +246,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     
     user = await db.get_user(username)
     
-    # !!! Düzeltme: Super Admin veritabanında bulunmasa bile dictionary olarak döndürülmeli.
-    # Aksi takdirde, user None olduğu zaman, bu fonksiyonu çağıran yerlerde TypeError oluşabilir.
     if user is None and username == SUPER_ADMIN_USERNAME:
         return {
             "username": SUPER_ADMIN_USERNAME,
@@ -253,7 +254,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         }
     
     if user is None:
-        # Bu kısma sadece token'ı geçerli ama veritabanından silinmiş kullanıcılar düşmeli
         raise HTTPException(status_code=404, detail="User not found")
     
     return user
@@ -275,14 +275,15 @@ class BanRequest(BaseModel):
     username: str
     reason: str
 
-# CommandRequest NameError çözümü
 class CommandRequest(BaseModel):
     command: str
     args: Optional[List[str]] = []
 
+# !!! ANIME MODELİ GÜNCELLENDİ !!!
 class AnimeRequest(BaseModel):
-    script: str  
-    character: Optional[str] = "Anime Karakteri"
+    anime_name: str  
+    episode_number: int
+    character_name: Optional[str] = "Anime Karakteri"
 
 class MinecraftBotCommand(BaseModel):
     bot_id: str
@@ -295,18 +296,19 @@ class MinecraftBotCreate(BaseModel):
 
 # ====== AI HELPER ======
 class AIAssistant:
+    # ... (AIAssistant sınıfının içi, önceki revizyondan aynı kalır, model adı gemini-2.5-flash) ...
     def __init__(self):
         self.modes = {
             "arkadaş": "Sen samimi, yardımsever ve eğlenceli bir arkadaşsın. Konuşmalarında emoji kullan ve sıcak ol.",
             "düşman": "Sen sert, eleştirel ve meydan okuyan birisin. Keskin ve provokatif konuş.",
             "öğretmen": "Sen sabırlı, bilgili ve açıklayıcı bir öğretmensin. Her şeyi detaylı ve anlaşılır şekilde anlat."
         }
-        # Hata 404'ü çözmek için model adı "gemini-2.5-flash" olarak değiştirildi.
         self.chat_model = 'gemini-2.5-flash' 
     
     async def chat(self, message: str, mode: str = "arkadaş", history: List = []):
         if not genai or not GEMINI_API_KEY:
-            return "❌ Gemini AI entegrasyonu yüklenmedi veya API anahtarı eksik."
+            # Hata mesajı, frontend'deki durumu açıkça yansıtması için değiştirildi.
+            return "❌ AI/Gemini entegrasyonu yüklenmedi veya API anahtarı eksik."
         
         try:
             contents = []
@@ -326,11 +328,42 @@ class AIAssistant:
 
             return response.text
         except APIError as e:
-            # API Hata mesajı düzeltildi (Resim 1000002576.jpg hatasına daha uygun)
             return f"❌ AI Modeli Hatası: Gemini API'dan yanıt alınamadı. Model adı ('{self.chat_model}') veya API anahtarı geçersiz olabilir. Hata: {e}"
         except Exception as e:
             return f"❌ Genel Hata: {str(e)}"
-    
+            
+    # !!! YENİ FONKSİYON: ANİME DİYALOĞU OLUŞTURMA !!!
+    async def generate_anime_script(self, anime_name: str, episode_number: int, character_name: str):
+        if not genai or not GEMINI_API_KEY:
+            return None, "❌ AI/Gemini entegrasyonu yüklenmedi veya API anahtarı eksik."
+        
+        prompt = (
+            f"Sen profesyonel bir senaryo yazarı ve dublaj asistanısın. Bana popüler anime '{anime_name}'in 60. bölümü (veya benzeri bir bölüm) için {character_name}'in yer aldığı, 20-30 saniye sürecek kısa, etkili ve dramatik bir Türkçe dublaj diyalog metni oluştur. "
+            "Sadece diyalog metnini ve karakter isimlerini 'Karakter: Diyalog' formatında ver. Başlık, açıklama veya ek not kullanma. Sadece saf diyalog metni istiyorum."
+        )
+        
+        try:
+            response = await asyncio.to_thread(
+                genai.GenerativeModel(self.chat_model).generate_content,
+                prompt,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction="Sadece talep edilen diyalog metnini, ek açıklama veya başlık olmadan döndür."
+                )
+            )
+            
+            # Bazı basit temizlikler
+            script = response.text.strip()
+            if script.startswith("Karakter") or script.startswith(character_name):
+                 return script, None
+            else:
+                 return script, "⚠️ AI diyalog formatını tam olarak takip etmedi, ancak metin başarıyla alındı."
+            
+        except APIError as e:
+            return None, f"❌ AI Modeli Hatası: Diyalog oluşturulamadı. {e}"
+        except Exception as e:
+            return None, f"❌ Genel Hata: {str(e)}"
+
+
 ai_assistant = AIAssistant()
 
 # ====== TTS HELPER (Aynı Kaldı) ======
@@ -376,7 +409,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====== WORKER LOGIC ======
+# ====== WORKER LOGIC (Aynı Kaldı) ======
 async def minecraft_worker_logic():
     print("⛏️ Minecraft Bot Worker Başlatıldı.")
     while True:
@@ -432,7 +465,6 @@ async def anime_producer_logic():
     while True:
         try:
             all_videos = await db.get_anime_videos(SUPER_ADMIN_USERNAME) 
-            # !!! Hata Düzeltme: SyntaxError: for döngüsü değişkenlerinden sonra 'in' bekleniyor
             pending_videos = [v for v in all_videos if v.get("status") == "video_pending"]
             
             if not pending_videos:
@@ -453,7 +485,7 @@ async def anime_producer_logic():
                 Path("static/videos").mkdir(parents=True, exist_ok=True)
                 # Simülasyon amaçlı dosya yazma
                 await asyncio.to_thread(
-                    lambda: Path(f"static/videos/{video_filename}").write_text(f"Simüle Edilmiş Video İçeriği: {video['script']}", encoding='utf-8')
+                    lambda: Path(f"static/videos/{video_filename}").write_text(f"Simüle Edilmiş Video İçeriği: {video['anime_name']} - Bölüm {video['episode_number']}: {video['script']}", encoding='utf-8')
                 )
 
                 await db.update_anime_video(video_id, {
@@ -472,6 +504,7 @@ async def anime_producer_logic():
 
 # ====== ENDPOINTS ======
 
+# ... (register, login, get_me, chat, get_chat_history, clear_chat_history, execute_command, admin endpoints aynı kalır) ...
 @app.post("/api/register")
 async def register(req: RegisterRequest):
     if await db.get_user(req.username):
@@ -599,25 +632,36 @@ async def ban_user(req: BanRequest, current_user: dict = Depends(get_current_use
     await db.add_ban(ban_record)
     return {"message": f"User {req.username} has been banned"}
 
+# !!! ANIME ENDPOINT'İ GÜNCELLENDİ !!!
 @app.post("/api/anime/generate")
 async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Only super admin can generate anime videos")
     
-    script = req.script
-    if not script:
-        raise HTTPException(status_code=400, detail="Anime dublajı için script alanı boş bırakılamaz.")
+    # 1. AI ile diyaloğu oluştur
+    generated_script, ai_error = await ai_assistant.generate_anime_script(
+        req.anime_name,
+        req.episode_number,
+        req.character_name
+    )
+
+    if generated_script is None:
+        raise HTTPException(status_code=503, detail=f"AI Diyalog Oluşturma Hatası: {ai_error}")
     
+    # 2. Diyaloğu ses dosyasına dönüştür
     audio_filename = f"anime_{uuid.uuid4()}.wav"
     audio_path = Path(f"static/audio/{audio_filename}")
     audio_path.parent.mkdir(parents=True, exist_ok=True)
     
-    audio_success = await tts_engine.text_to_speech_file(script, str(audio_path))
+    audio_success = await tts_engine.text_to_speech_file(generated_script, str(audio_path))
     
+    # 3. Veritabanına kaydet
     video_record = {
         "id": str(uuid.uuid4()),
-        "script": script, 
-        "character": req.character,
+        "anime_name": req.anime_name,
+        "episode_number": req.episode_number,
+        "character": req.character_name,
+        "script": generated_script, # Oluşturulan diyalog
         "audio_url": f"/static/audio/{audio_filename}" if audio_success else None,
         "video_url": None,
         "created_by": current_user["username"],
@@ -625,12 +669,13 @@ async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_cur
         "status": "video_pending" if audio_success else "audio_failed" 
     }
     
+    await db.add_anime_video(video_record)
+    
     if audio_success:
-        await db.add_anime_video(video_record)
-        return {"video": video_record, "message": "Anime diyalog sesi oluşturuldu. Video üretimi arka planda başlıyor..."}
+        return {"video": video_record, "message": f"AI tarafından '{req.anime_name}' için diyalog oluşturuldu. Ses dosyası hazırlandı. Video üretimi arka planda başlıyor..."}
     else:
-        await db.add_anime_video(video_record) 
-        return {"video": video_record, "message": "Diyalog metni kaydedildi ancak ses dosyası oluşturulamadı (TTS Motoru Hatası).", "error": True}
+        return {"video": video_record, "message": "AI diyalog oluşturdu ancak ses dosyası oluşturulamadı (TTS Motoru Hatası).", "error": True}
+
 
 @app.get("/api/anime/videos")
 async def get_anime_videos(current_user: dict = Depends(get_current_user)):
@@ -680,7 +725,7 @@ async def send_bot_command(req: MinecraftBotCommand, current_user: dict = Depend
     
     return {"message": "Komut gönderildi. Bot worker'ı kısa süre içinde işleme başlayacak.", "command": req.command}
 
-# ====== FRONTEND HTML ======
+# ====== FRONTEND HTML (GÜNCELLENDİ) ======
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     html = """
@@ -747,7 +792,7 @@ async def serve_frontend():
                 color: var(--text-light);
                 font-weight: 400;
             }
-            .form-group input {
+            .form-group input, .form-group textarea {
                 width: 100%;
                 padding: 12px;
                 border: 1px solid #44475a;
@@ -757,7 +802,7 @@ async def serve_frontend():
                 font-size: 1rem;
                 transition: border-color 0.3s;
             }
-            .form-group input:focus {
+            .form-group input:focus, .form-group textarea:focus {
                 outline: none;
                 border-color: var(--primary);
             }
@@ -930,17 +975,19 @@ async def serve_frontend():
                 border: 1px solid #44475a;
             }
 
-            /* Hata mesajı için textarea stili */
-            #animeScript {
-                width: 100%;
-                min-height: 150px;
-                padding: 10px;
-                border: 1px solid #44475a;
-                border-radius: 6px;
-                background-color: #383a48;
-                color: var(--text);
-                font-size: 1rem;
-                resize: vertical;
+            /* Anime Form Düzeni */
+            .anime-form-grid {
+                display: grid;
+                grid-template-columns: 2fr 1fr 1fr 150px; /* Anime Adı, Bölüm No, Karakter, Buton */
+                gap: 20px;
+            }
+            .anime-history-card .script-display {
+                background-color: #44475a;
+                padding: 8px;
+                border-radius: 4px;
+                margin-top: 10px;
+                font-size: 0.85rem;
+                white-space: pre-wrap;
             }
 
         </style>
@@ -1005,18 +1052,22 @@ async def serve_frontend():
                 </div>
                 
                 <div id="animeTab" class="tab-content">
-                    <h2>🎬 Anime Dublaj İşlemi (Var Olan Bölüm)</h2>
-                    <p style="color: var(--text-light); margin-bottom: 15px;">Aşağıya bir bölümden alınan diyalog metnini girin. Sistem bu metni Türkçe seslendirecek ve video üretimine başlayacaktır.</p>
-                    <div class="card-grid" style="grid-template-columns: 1fr 1fr 200px;">
-                        <div class="form-group" style="grid-column: 1 / span 2;">
-                            <label>Diyalog Metni (Script)</label>
-                            <textarea id="animeScript" placeholder="Karakter 1: Bugün hava çok güzel değil mi?&#10;Karakter 2: Evet, ama antrenmanı bitirmeliyiz."></textarea>
+                    <h2>🎬 Anime Dublaj İşlemi (AI Destekli)</h2>
+                    <p style="color: var(--text-light); margin-bottom: 15px;">Anime Adı ve Bölüm No girin. AI, kısa bir diyalog oluşturacak ve dublaj/video üretimi başlayacaktır.</p>
+                    <div class="anime-form-grid">
+                        <div class="form-group">
+                            <label>Anime Adı</label>
+                            <input type="text" id="animeName" placeholder="Naruto">
+                        </div>
+                        <div class="form-group">
+                            <label>Bölüm No</label>
+                            <input type="number" id="episodeNumber" placeholder="60" value="1">
                         </div>
                         <div class="form-group">
                             <label>Karakter Adı</label>
-                            <input type="text" id="animeCharacter" placeholder="Naruto" value="Anime Karakteri">
+                            <input type="text" id="animeCharacter" placeholder="Sasuke" value="Anime Karakteri">
                         </div>
-                        <div class="form-group" style="align-self: flex-end; grid-column: 3 / 4;">
+                        <div class="form-group" style="align-self: flex-end;">
                             <button class="btn btn-full" onclick="generateAnime()">Dublajı Başlat</button>
                         </div>
                     </div>
@@ -1093,7 +1144,6 @@ async def serve_frontend():
                         body: body ? JSON.stringify(body) : null
                     });
                     
-                    // 204 No Content durumunu kontrol et
                     if (response.status === 204) return { message: "İşlem başarılı" }; 
 
                     const data = await response.json();
@@ -1291,21 +1341,25 @@ async def serve_frontend():
                 `).join('') || '<p style="color: var(--text-light);">Yasaklı kullanıcı yok</p>' : '<p style="color: var(--text-light);">Yasaklama verisi yüklenemedi.</p>';
             }
 
-            // Anime Functions
+            // Anime Functions (GÜNCELLENDİ)
             async function generateAnime() {
-                const script = document.getElementById('animeScript').value;
-                const character = document.getElementById('animeCharacter').value;
+                const animeName = document.getElementById('animeName').value;
+                const episodeNumber = parseInt(document.getElementById('episodeNumber').value);
+                const characterName = document.getElementById('animeCharacter').value;
                 
-                if (!script) {
-                    alert('Lütfen dublaj metnini (script) girin.');
+                if (!animeName || isNaN(episodeNumber) || episodeNumber < 1) {
+                    alert('Lütfen geçerli bir Anime Adı ve Bölüm Numarası girin.');
                     return;
                 }
                 
-                const data = await apiCall('/api/anime/generate', 'POST', {script, character});
+                const data = await apiCall('/api/anime/generate', 'POST', {
+                    anime_name: animeName, 
+                    episode_number: episodeNumber,
+                    character_name: characterName
+                });
                 
                 if (data) {
                     alert(data.message);
-                    document.getElementById('animeScript').value = '';
                     loadAnimeHistory(); 
                 }
             }
@@ -1319,7 +1373,7 @@ async def serve_frontend():
                 if (data && data.videos.length > 0) {
                     data.videos.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).forEach(video => {
                         const card = document.createElement('div');
-                        card.className = 'data-card';
+                        card.className = 'data-card anime-history-card';
                         
                         let statusText;
                         let statusColor;
@@ -1343,8 +1397,12 @@ async def serve_frontend():
                         
                         card.style.borderLeftColor = statusColor;
                         card.innerHTML = `
-                            <strong>${video.character}</strong> <span style="color: ${statusColor};">(${statusText})</span><br>
-                            <small style="color: var(--text-light);">Diyalog (İlk 150): ${video.script.substring(0, 150)}...</small>
+                            <strong>${video.anime_name} - Bölüm ${video.episode_number}</strong><br>
+                            <span style="color: ${statusColor};">(${statusText})</span> - Karakter: ${video.character}<br>
+                            <small style="color: var(--text-light);">Oluşturma: ${new Date(video.created_at).toLocaleString('tr-TR')}</small>
+                            <div class="script-display">
+                                ${video.script}
+                            </div>
                             ${mediaContent}
                         `;
                         historyDiv.appendChild(card);
@@ -1397,7 +1455,6 @@ async def serve_frontend():
                         card.className = 'data-card';
                         card.style.borderLeftColor = statusColor;
                         
-                        // Hata çözüldü: HTML içindeki JS çağrılarında tırnak kullanımı kontrol edildi.
                         card.innerHTML = `
                             <strong>${bot.bot_name}</strong>
                             <span class="${statusClass}">(${statusText})</span><br>
@@ -1477,7 +1534,7 @@ async def start_workers():
 if __name__ == "__main__":
     import uvicorn
     
-    print("🚀 AURION Project v17.3 (Final Revizyon) başlatılıyor...")
+    print("🚀 AURION Project v17.3 (Final Revizyon 2) başlatılıyor...")
     print("🔐 Super Admin: enes / enes13579")
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
