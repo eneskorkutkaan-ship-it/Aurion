@@ -22,8 +22,6 @@ try:
     import google.generativeai as genai
     from google.generativeai.errors import APIError
     
-    # Yeni SDK kullanıldığında google.generativeai.client içinden client objesi alınır
-    # Eğer bu çalışmazsa, eski method kullanılabilir.
     try:
         from google.generativeai import client
         GEMINI_CLIENT = client.get_default_client()
@@ -64,12 +62,11 @@ if GEMINI_API_KEY and genai:
 
 # ====== DATABASE (ASENKRON GÜVENLİ) ======
 class Database:
+    # ... (Database sınıfı önceki kodla aynı kaldı, asenkron güvenli erişim metotları korunmuştur) ...
     def __init__(self):
-        # Yalnızca başlatma sırasında yükle, Worker'lar ve API çağrıları to_thread kullanacak
         self.data = self.load_sync()
         
     def load_sync(self):
-        """Senkron yükleme (Yalnızca başlatma ve worker'lar için kullanılır)."""
         if DB_FILE.exists():
             try:
                 with open(DB_FILE, 'r', encoding='utf-8') as f:
@@ -91,11 +88,9 @@ class Database:
         }
 
     async def load(self):
-        """Asenkron yükleme."""
         return await asyncio.to_thread(self.load_sync)
 
     def save_sync(self, data):
-        """Senkron kaydetme."""
         try:
             temp_file = DB_FILE.with_suffix('.tmp')
             with open(temp_file, 'w', encoding='utf-8') as f:
@@ -105,10 +100,7 @@ class Database:
             print(f"!!! [DB WRITE ERROR] Kayıt hatası: {e}")
 
     async def save(self):
-        """Asenkron kaydetme. Çalışan veriyi güncel tutar."""
         await asyncio.to_thread(self.save_sync, self.data.copy())
-
-    # Veritabanı CRUD Metotları (ASENKRON YAPILDI)
     
     async def get_users(self):
         self.data = await self.load()
@@ -165,7 +157,6 @@ class Database:
         self.data = await self.load()
         return self.data["bans"]
     
-    # Minecraft Bot Metotları
     async def add_minecraft_bot(self, bot):
         self.data = await self.load()
         bot["current_task"] = None
@@ -186,7 +177,6 @@ class Database:
         self.data = await self.load()
         return self.data.get("minecraft_bots", [])
     
-    # Anime Video Metotları
     async def add_anime_video(self, video):
         self.data = await self.load()
         if video.get("status") == "completed":
@@ -209,8 +199,7 @@ class Database:
 
 db = Database()
 
-# ====== SECURITY & AUTH (Aynı Kaldı, DB çağrıları async oldu) ======
-# (verify_password, get_password_hash, create_access_token, decode_token, get_current_user fonksiyonları önceki kodunuzdaki gibi)
+# ====== SECURITY & AUTH (Aynı Kaldı) ======
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
@@ -260,7 +249,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     
     return user
 
-# ====== MODELS (Aynı Kaldı) ======
+# ====== MODELS (Anime kısmı revize edildi) ======
 class RegisterRequest(BaseModel):
     username: str
     password: str
@@ -273,16 +262,13 @@ class ChatRequest(BaseModel):
     message: str
     mode: Optional[str] = "arkadaş"
 
-class CommandRequest(BaseModel):
-    command: str
-    args: Optional[List[str]] = []
-
 class BanRequest(BaseModel):
     username: str
     reason: str
 
+# Yeni gereksinime göre Anime modeli (Metni dublaja çevirir, AI script üretmez)
 class AnimeRequest(BaseModel):
-    prompt: str
+    script: str  # Var olan bölümden alınan diyalog metni
     character: Optional[str] = "Anime Karakteri"
 
 class MinecraftBotCommand(BaseModel):
@@ -294,7 +280,7 @@ class MinecraftBotCreate(BaseModel):
     server_ip: str
     server_port: int = 25565
 
-# ====== AI HELPER (Model Düzeltmesi Yapıldı) ======
+# ====== AI HELPER (Anime script üretme fonksiyonu çıkarıldı) ======
 class AIAssistant:
     def __init__(self):
         self.modes = {
@@ -302,7 +288,6 @@ class AIAssistant:
             "düşman": "Sen sert, eleştirel ve meydan okuyan birisin. Keskin ve provokatif konuş.",
             "öğretmen": "Sen sabırlı, bilgili ve açıklayıcı bir öğretmensin. Her şeyi detaylı ve anlaşılır şekilde anlat."
         }
-        # Yeni ve çalışan bir model adı kullan
         self.chat_model = 'gemini-2.5-flash' 
     
     async def chat(self, message: str, mode: str = "arkadaş", history: List = []):
@@ -310,16 +295,13 @@ class AIAssistant:
             return "❌ Gemini AI entegrasyonu yüklenmedi veya API anahtarı eksik."
         
         try:
-            # History'yi Gemini formatına dönüştür
             contents = []
             for h in history:
                 contents.append({"role": "user", "parts": [{"text": h['user']}]})
                 contents.append({"role": "model", "parts": [{"text": h['ai']}]})
 
-            # Yeni mesajı ekle
             contents.append({"role": "user", "parts": [{"text": message}]})
 
-            # Düzeltme: Yeni model ve daha güvenli çağrı metodu
             response = await asyncio.to_thread(
                 genai.GenerativeModel(self.chat_model).generate_content,
                 contents,
@@ -330,32 +312,11 @@ class AIAssistant:
 
             return response.text
         except APIError as e:
-            # Resim 1000002576.jpg'daki hatayı yakalamak için
+            # Resim 1000002576.jpg'daki "404 models/gemini-pro" hatasını yakalar.
             return f"❌ AI Modeli Hatası (404/API): Lütfen API anahtarınızı ve model adını kontrol edin. Hata: {e}"
         except Exception as e:
             return f"❌ Genel Hata: {str(e)}"
     
-    async def generate_anime_script(self, prompt: str, character: str):
-        if not genai or not GEMINI_API_KEY:
-            return "Anime karakteri konuşuyor: Bu bir demo metindir. API bağlantısı kurulamadı."
-        
-        try:
-            system_prompt = f"""
-            Sen bir anime senaryo yazarısın. Kullanıcının isteğine göre {character} karakterinin 
-            konuşması için kısa (30-60 saniye) bir Türkçe anime diyalogu yaz.
-            Sadece diyalog metnini ver, başka açıklama yapma.
-            """
-            
-            full_prompt = f"{system_prompt}\n\nİstek: {prompt}\n\nDiyalog:"
-            
-            response = await asyncio.to_thread(
-                genai.GenerativeModel(self.chat_model).generate_content,
-                full_prompt
-            )
-            return response.text
-        except Exception as e:
-            return f"Demo anime metni: {prompt}"
-
 ai_assistant = AIAssistant()
 
 # ====== TTS HELPER (Aynı Kaldı) ======
@@ -367,13 +328,13 @@ class TTSEngine:
                 self.engine = pyttsx3.init()
                 voices = self.engine.getProperty('voices')
                 for voice in voices:
+                    # Türkçe ses bulma mantığı korunur
                     if 'turkish' in voice.name.lower() or 'tr' in voice.id.lower():
                         self.engine.setProperty('voice', voice.id)
                         break
             except:
                 self.engine = None
     
-    # Senkron TTS işlemini bir thread'de çalıştırmak için
     def text_to_speech_file_sync(self, text: str, filename: str):
         if not self.engine:
             return False
@@ -392,7 +353,7 @@ class TTSEngine:
 tts_engine = TTSEngine()
 
 # ====== FASTAPI APP ======
-app = FastAPI(title="AURION Project v17.0", description="Super Admin Kontrol Merkezi")
+app = FastAPI(title="AURION Project v17.2", description="Super Admin Kontrol Merkezi")
 
 app.add_middleware(
     CORSMiddleware,
@@ -402,10 +363,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====== WORKER LOGIC (Mantık Düzeltmesi Yapıldı) ======
+# ====== WORKER LOGIC (Aynı Kaldı) ======
 
 async def minecraft_worker_logic():
-    """Minecraft Bot Worker'ının Simülasyonu. Sadece komut bekleyen veya aktif olanları işler."""
     print("⛏️ Minecraft Bot Worker Başlatıldı.")
     while True:
         try:
@@ -416,27 +376,19 @@ async def minecraft_worker_logic():
                 bot_name = bot.get("bot_name", "Bilinmeyen Bot")
                 last_command = bot.get("last_command")
                 
-                # --- Durum Yönetimi Düzeltmesi ---
-                # Worker, manuel bir 'offline' durumu bozmamalıdır.
-                # Botun durumunu ilk önce 'online' olarak güncelleyelim, böylece arayüzde görünecek.
                 if bot.get("status") != "online":
                     await db.update_minecraft_bot(bot_id, {"status": "online"})
                 
-                # Rastgele ekran URL'si güncellemesi (Bot çalışıyor görünüyor)
                 screen_url = f"/static/img/sim/screen_{bot_id}_{int(time.time())}.jpg"
-                # Sadece ekran URL'sini güncelleyelim, status'u değil.
                 await db.update_minecraft_bot(bot_id, {"screen_url": screen_url})
 
                 if not last_command:
-                    # print(f"[{bot_name}] Komut yok, rölanti modunda.")
                     continue
 
                 print(f"--- ⛏️ [{bot_name}] Komut işleniyor: {last_command} ---")
                 
-                # Komutu veritabanından sil (işleniyor olarak işaretle)
                 await db.update_minecraft_bot(bot_id, {"last_command": None, "current_task": f"İşleniyor: {last_command}"})
 
-                # Simülasyon: Komutun işlenmesi için bekle
                 if "mine" in last_command.lower():
                     action_time = 7
                     result = "Elmas cevheri başarıyla çıkarıldı."
@@ -449,7 +401,6 @@ async def minecraft_worker_logic():
 
                 await asyncio.sleep(action_time)
                 
-                # Sonucu veritabanına kaydet ve botu rölantiye al
                 await db.update_minecraft_bot(bot_id, {
                     "current_task": f"Bitti: {result}",
                     "screen_url": f"/static/img/sim/screen_{bot_id}_{int(time.time())}_done.jpg" 
@@ -464,16 +415,13 @@ async def minecraft_worker_logic():
 
 
 async def anime_producer_logic():
-    """Anime Video Producer'ının Simülasyonu. Sadece video_pending durumunda olanları işler."""
     print("🎬 Anime Producer Worker Başlatıldı.")
     while True:
         try:
-            # get_anime_videos metodu sadece video_pending olanları filtreleyebilir
-            all_videos = await db.get_anime_videos(SUPER_ADMIN_USERNAME) # Tüm videoları çek
+            all_videos = await db.get_anime_videos(SUPER_ADMIN_USERNAME) 
             pending_videos = [v for v in all_videos if v.get("status") == "video_pending"]
             
             if not pending_videos:
-                # print("Video bekleyen görev yok. Bekleniyor...")
                 pass
             
             for video in pending_videos:
@@ -481,24 +429,19 @@ async def anime_producer_logic():
                 
                 print(f"--- 🎬 [Video ID: {video_id[:8]}] Video üretimine başlanıyor... ---")
                 
-                # Durumu "Üretiliyor" olarak güncelle
                 await db.update_anime_video(video_id, {"status": "producing", "start_time": datetime.utcnow().isoformat()})
 
-                # Simülasyon: Video üretimi için bekleme
                 await asyncio.sleep(VIDEO_PRODUCTION_TIME)
                 
-                # Simüle edilmiş video dosyası yolu (Gerçekte bir .mp4 dosyası)
                 video_filename = f"anime_video_{video_id}.mp4"
                 video_url = f"/static/videos/{video_filename}"
                 
-                # Video dosyasını oluştur (Simülasyon amaçlı)
                 Path("static/videos").mkdir(parents=True, exist_ok=True)
-                # Burayı asenkron dosya yazma yapmaya gerek yok, çünkü to_thread içindeyiz
+                # Simülasyon amaçlı dosya yazma
                 await asyncio.to_thread(
-                    lambda: Path(f"static/videos/{video_filename}").write_text(f"Simüle Edilmiş Video İçeriği: {video['prompt']}", encoding='utf-8')
+                    lambda: Path(f"static/videos/{video_filename}").write_text(f"Simüle Edilmiş Video İçeriği: {video['script']}", encoding='utf-8')
                 )
 
-                # Sonucu veritabanına kaydet
                 await db.update_anime_video(video_id, {
                     "status": "video_completed",
                     "video_url": video_url,
@@ -513,16 +456,12 @@ async def anime_producer_logic():
         await asyncio.sleep(WORKER_LOOP_INTERVAL)
 
 
-# ====== AUTH, CHAT, COMMAND, ADMIN, MINECRAFT, ANIME ENDPOINTS (Aynı Kaldı/DB Async Çağrıldı) ======
-
-# DB erişimi olan tüm API endpoint'leri `await db.get_users()`, `await db.add_user()`, vb. şeklinde async olarak çağrılmaktadır.
-# Bu sayede DB access hatası (Resim 1000002571.jpg'deki timeout) büyük ölçüde çözülür.
+# ====== ENDPOINTS (Anime endpoint'i revize edildi) ======
 
 @app.post("/api/register")
 async def register(req: RegisterRequest):
     if await db.get_user(req.username):
         raise HTTPException(status_code=400, detail="Username already exists")
-    # ... (Kayıt mantığı)
     user = {
         "id": str(uuid.uuid4()),
         "username": req.username,
@@ -537,7 +476,6 @@ async def register(req: RegisterRequest):
 
 @app.post("/api/login")
 async def login(req: LoginRequest):
-    # Super admin check
     if req.username == SUPER_ADMIN_USERNAME and req.password == SUPER_ADMIN_PASSWORD:
         token = create_access_token({"sub": req.username, "role": "super_admin"})
         return {"token": token, "user": {"username": req.username, "role": "super_admin"}}
@@ -560,7 +498,6 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
     chat_history = [{"user": c["message"], "ai": c["response"]} for c in history[-10:]]
     user_mode = current_user.get("mode", "arkadaş")
     
-    # Model 404/API hatası çözüldü
     ai_response = await ai_assistant.chat(req.message, req.mode or user_mode, chat_history) 
     
     chat_record = {
@@ -573,6 +510,8 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
     }
     await db.add_chat(chat_record)
     return {"response": ai_response, "mode": req.mode or user_mode}
+
+# ... (Diğer /api/chat/history, /api/command, /api/admin/* endpoints'leri aynı kaldı) ...
 
 @app.get("/api/chat/history")
 async def get_chat_history(current_user: dict = Depends(get_current_user)):
@@ -607,8 +546,6 @@ async def execute_command(req: CommandRequest, current_user: dict = Depends(get_
     elif cmd == "/clear":
         await db.clear_chats(username)
         result = {"success": True, "message": "Sohbet geçmişi temizlendi"}
-    
-    # ... (Diğer komutlar aynı kaldı)
     
     cmd_record = {
         "id": str(uuid.uuid4()),
@@ -655,7 +592,10 @@ async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_cur
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Only super admin can generate anime videos")
     
-    script = await ai_assistant.generate_anime_script(req.prompt, req.character)
+    # Yeni mantık: Kullanıcının verdiği script'i (diyaloğu) doğrudan TTS'e çevir.
+    script = req.script
+    if not script:
+        raise HTTPException(status_code=400, detail="Anime dublajı için script alanı boş bırakılamaz.")
     
     audio_filename = f"anime_{uuid.uuid4()}.wav"
     audio_path = Path(f"static/audio/{audio_filename}")
@@ -666,18 +606,23 @@ async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_cur
     
     video_record = {
         "id": str(uuid.uuid4()),
-        "prompt": req.prompt,
+        "script": script, # Artık prompt yerine script kaydediliyor
         "character": req.character,
-        "script": script,
         "audio_url": f"/static/audio/{audio_filename}" if audio_success else None,
         "video_url": None,
         "created_by": current_user["username"],
         "created_at": datetime.utcnow().isoformat(),
-        "status": "completed" if audio_success else "audio_failed" 
+        "status": "video_pending" if audio_success else "audio_failed" # Başarılıysa video worker'ı beklesin
     }
-    await db.add_anime_video(video_record)
     
-    return {"video": video_record, "message": "Anime script ve ses dosyası oluşturuldu. Video üretimi arka planda başlıyor..." if audio_success else "Script oluşturuldu, ses dosyası oluşturulamadı"}
+    # Audio başarılıysa, worker'ın işleyeceği şekilde kaydet.
+    if audio_success:
+        await db.add_anime_video(video_record)
+        return {"video": video_record, "message": "Anime diyalog sesi oluşturuldu. Video üretimi arka planda başlıyor..."}
+    else:
+        # Eğer TTS başarısız olursa yine de kaydet ve hata mesajı döndür
+        await db.add_anime_video(video_record) 
+        return {"video": video_record, "message": "Diyalog metni kaydedildi ancak ses dosyası oluşturulamadı (TTS Motoru Hatası).", "error": True}
 
 @app.get("/api/anime/videos")
 async def get_anime_videos(current_user: dict = Depends(get_current_user)):
@@ -727,7 +672,7 @@ async def send_bot_command(req: MinecraftBotCommand, current_user: dict = Depend
     
     return {"message": "Komut gönderildi. Bot worker'ı kısa süre içinde işleme başlayacak.", "command": req.command}
 
-# ====== FRONTEND HTML (TASARIM VE İŞLEVSELLİK DÜZELTİLDİ) ======
+# ====== FRONTEND HTML (Tasarım ve Anime kısmı revize edildi) ======
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     html = """
@@ -736,7 +681,7 @@ async def serve_frontend():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>AURION Project v17.1 - Super Admin</title>
+        <title>AURION Project v17.2 - Super Admin</title>
         <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
         <style>
             /* Genel Stil ve Koyu Tema */
@@ -763,12 +708,79 @@ async def serve_frontend():
                 display: flex;
             }
             
+            /* GİRİŞ TASARIMI DÜZELTİLDİ */
+            #authSection {
+                width: 100%;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+            .auth-card {
+                max-width: 450px; /* Daha geniş */
+                width: 90%;
+                margin: 50px auto;
+                background-color: var(--surface);
+                padding: 40px;
+                border-radius: 12px;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+                text-align: center;
+            }
+            .auth-card h2 {
+                color: var(--primary);
+                margin-bottom: 25px;
+            }
+            .form-group {
+                margin-bottom: 20px;
+                text-align: left;
+            }
+            .form-group label {
+                display: block;
+                margin-bottom: 8px;
+                color: var(--text-light);
+                font-weight: 400;
+            }
+            .form-group input {
+                width: 100%;
+                padding: 12px;
+                border: 1px solid #44475a;
+                border-radius: 6px;
+                background-color: #383a48;
+                color: var(--text);
+                font-size: 1rem;
+                transition: border-color 0.3s;
+            }
+            .form-group input:focus {
+                outline: none;
+                border-color: var(--primary);
+            }
+            .btn {
+                padding: 10px 20px;
+                background-color: var(--primary);
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 1rem;
+                font-weight: 700;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            }
+            .btn:hover {
+                background-color: var(--primary-dark);
+            }
+            .btn-full {
+                width: 100%;
+                margin-top: 10px;
+            }
+            .btn-secondary {
+                background-color: #6c757d;
+            }
+
             /* Sidebar */
             .sidebar {
                 width: 250px;
                 background-color: var(--surface);
                 padding: 20px 0;
-                box-shadow: 2px 0 5px rgba(0, 0, 0, 0.2);
+                box-shadow: 2px 0 10px rgba(0, 0, 0, 0.4);
                 flex-shrink: 0;
             }
             .sidebar h1 {
@@ -777,6 +789,13 @@ async def serve_frontend():
                 margin-bottom: 30px;
                 color: var(--primary);
             }
+            .user-info {
+                padding: 0 20px 15px;
+                border-bottom: 1px solid #44475a;
+                margin-bottom: 15px;
+            }
+            .user-info span { display: block; margin-bottom: 5px; font-size: 0.9rem; }
+            .user-info .role { color: var(--success); font-weight: 700; }
             .nav-link {
                 padding: 15px 20px;
                 display: flex;
@@ -822,60 +841,6 @@ async def serve_frontend():
                 font-size: 1.1rem;
             }
 
-            /* Auth Section */
-            #authSection {
-                max-width: 400px;
-                margin: auto;
-                background-color: var(--surface);
-                padding: 40px;
-                border-radius: 10px;
-                box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5);
-            }
-            .form-group {
-                margin-bottom: 20px;
-            }
-            .form-group label {
-                display: block;
-                margin-bottom: 8px;
-                color: var(--text-light);
-                font-weight: 400;
-            }
-            .form-group input {
-                width: 100%;
-                padding: 12px;
-                border: 1px solid #44475a;
-                border-radius: 6px;
-                background-color: #383a48;
-                color: var(--text);
-                font-size: 1rem;
-                transition: border-color 0.3s;
-            }
-            .form-group input:focus {
-                outline: none;
-                border-color: var(--primary);
-            }
-            .btn {
-                padding: 10px 20px;
-                background-color: var(--primary);
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-size: 1rem;
-                font-weight: 700;
-                cursor: pointer;
-                transition: background-color 0.2s;
-            }
-            .btn:hover {
-                background-color: var(--primary-dark);
-            }
-            .btn-full {
-                width: 100%;
-                margin-top: 10px;
-            }
-            .btn-secondary {
-                background-color: #6c757d;
-            }
-
             /* Tab Content */
             .tab-content {
                 display: none;
@@ -883,7 +848,7 @@ async def serve_frontend():
                 padding: 30px;
                 border-radius: 10px;
                 flex-grow: 1;
-                overflow-y: auto; /* İçeriğin kaydırılabilir olması için */
+                overflow-y: auto; 
             }
             .tab-content.active {
                 display: flex;
@@ -915,7 +880,7 @@ async def serve_frontend():
                 background: #383a48;
                 border-radius: 8px;
                 padding: 15px;
-                height: 450px;
+                height: 600px; /* Daha geniş */
                 overflow-y: auto;
                 margin-bottom: 20px;
                 display: flex;
@@ -939,6 +904,7 @@ async def serve_frontend():
                 color: var(--text);
                 align-self: flex-start;
                 border-bottom-left-radius: 5px;
+                white-space: pre-wrap; /* Cevapların düzenli görünmesi için */
             }
             .chat-input {
                 display: flex;
@@ -948,7 +914,7 @@ async def serve_frontend():
                 flex: 1;
             }
 
-            /* Admin/Bot/Anime */
+            /* Admin/Bot/Anime Ortak Stiller */
             h2 {
                 color: var(--primary);
                 margin-bottom: 20px;
@@ -972,39 +938,49 @@ async def serve_frontend():
             .status-offline { color: var(--danger); }
             .status-pending { color: orange; }
 
-            /* Minecraft Bot Card */
-            .bot-screen-img {
+            /* Anime Dublaj */
+            #animeScript {
                 width: 100%;
-                height: auto;
-                margin-top: 10px;
-                border-radius: 4px;
+                min-height: 150px;
+                padding: 12px;
                 border: 1px solid #44475a;
+                border-radius: 6px;
+                background-color: #383a48;
+                color: var(--text);
+                font-size: 1rem;
+                resize: vertical;
             }
-            .bot-command-input {
-                display: flex;
-                gap: 5px;
-                margin-top: 10px;
+            #animeHistory .data-card {
+                border-left-color: #f7a040;
             }
         </style>
     </head>
     <body>
         
-        <div id="authSection" style="display: none;">
-            <div class="form-group">
-                <label>Kullanıcı Adı</label>
-                <input type="text" id="username" placeholder="Kullanıcı adınız">
+        <div id="authSection">
+            <div class="auth-card">
+                <h2 id="authTitle">Giriş Yap</h2>
+                <div class="form-group">
+                    <label>Kullanıcı Adı</label>
+                    <input type="text" id="username" placeholder="Kullanıcı adınız">
+                </div>
+                <div class="form-group">
+                    <label>Şifre</label>
+                    <input type="password" id="password" placeholder="Şifreniz">
+                </div>
+                <button class="btn btn-full" id="authPrimaryBtn" onclick="login()">Giriş Yap</button>
+                <button class="btn btn-full btn-secondary" id="authSwitchBtn" onclick="toggleAuthMode()">Kayıt Sayfasına Git</button>
             </div>
-            <div class="form-group">
-                <label>Şifre</label>
-                <input type="password" id="password" placeholder="Şifreniz">
-            </div>
-            <button class="btn btn-full" onclick="login()">Giriş Yap</button>
-            <button class="btn btn-full btn-secondary" onclick="register()">Kayıt Ol</button>
         </div>
 
         <div id="dashboard" style="display: none; width: 100%;">
             <div class="sidebar">
                 <h1>AURION ⚡</h1>
+                <div class="user-info">
+                    <span>Hoş Geldiniz, <strong id="currentUsernameDisplay"></strong></span>
+                    <span>Rol: <strong class="role" id="currentRoleDisplay"></strong></span>
+                    <button class="btn btn-full" style="background-color: var(--danger); margin-top: 10px;" onclick="logout()">Çıkış Yap</button>
+                </div>
                 <nav id="navLinks">
                     <a class="nav-link active" data-tab="chat" onclick="switchTab('chat')">💬 Sohbet</a>
                     <a class="nav-link" id="adminLink" data-tab="admin" onclick="switchTab('admin')" style="display: none;">👑 Admin Panel</a>
@@ -1014,15 +990,8 @@ async def serve_frontend():
             </div>
             
             <div class="main-container">
-                <div class="header-bar">
-                    <div>
-                        <span id="currentUsernameDisplay"></span> 
-                        <span style="color: var(--primary);" id="currentRoleDisplay"></span>
-                    </div>
-                    <button class="btn" style="background-color: var(--danger);" onclick="logout()">Çıkış Yap</button>
-                </div>
-                
                 <div id="chatTab" class="tab-content active">
+                    <h2>💬 Gemini AI Sohbet</h2>
                     <div class="mode-selector">
                         <button class="mode-btn active" data-mode="arkadaş" onclick="selectMode('arkadaş')">😊 Arkadaş</button>
                         <button class="mode-btn" data-mode="düşman" onclick="selectMode('düşman')">😈 Düşman</button>
@@ -1046,18 +1015,19 @@ async def serve_frontend():
                 </div>
                 
                 <div id="animeTab" class="tab-content">
-                    <h2>🎬 Yeni Dublaj İsteği</h2>
-                    <div class="card-grid" style="grid-template-columns: 1fr 1fr 1fr;">
-                        <div class="form-group">
-                            <label>Anime İstemi</label>
-                            <input type="text" id="animePrompt" placeholder="Ninja köyde dolaşıyor...">
+                    <h2>🎬 Anime Dublaj İşlemi (Var Olan Bölüm)</h2>
+                    <p style="color: var(--text-light); margin-bottom: 15px;">Aşağıya bir bölümden alınan diyalog metnini girin. Sistem bu metni Türkçe seslendirecek ve video üretimine başlayacaktır.</p>
+                    <div class="card-grid" style="grid-template-columns: 1fr 1fr 200px;">
+                        <div class="form-group" style="grid-column: 1 / span 2;">
+                            <label>Diyalog Metni (Script)</label>
+                            <textarea id="animeScript" placeholder="Karakter 1: Bugün hava çok güzel değil mi?&#10;Karakter 2: Evet, ama antrenmanı bitirmeliyiz."></textarea>
                         </div>
                         <div class="form-group">
                             <label>Karakter Adı</label>
                             <input type="text" id="animeCharacter" placeholder="Naruto" value="Anime Karakteri">
                         </div>
-                        <div class="form-group" style="align-self: flex-end;">
-                            <button class="btn btn-full" onclick="generateAnime()">Oluştur ve Başlat</button>
+                        <div class="form-group" style="align-self: flex-end; grid-column: 3 / 4;">
+                            <button class="btn btn-full" onclick="generateAnime()">Dublajı Başlat</button>
                         </div>
                     </div>
 
@@ -1096,7 +1066,28 @@ async def serve_frontend():
             let token = localStorage.getItem('aurionToken');
             let currentUser = JSON.parse(localStorage.getItem('aurionUser'));
             let currentMode = localStorage.getItem('aurionMode') || 'arkadaş';
-            let updateInterval; // Worker güncelleme döngüsü için
+            let updateInterval; 
+            let isRegisterMode = false;
+            
+            // Auth Mode Toggle
+            function toggleAuthMode() {
+                isRegisterMode = !isRegisterMode;
+                const title = document.getElementById('authTitle');
+                const primaryBtn = document.getElementById('authPrimaryBtn');
+                const switchBtn = document.getElementById('authSwitchBtn');
+                
+                if (isRegisterMode) {
+                    title.textContent = 'Kayıt Ol';
+                    primaryBtn.textContent = 'Kayıt Ol';
+                    primaryBtn.onclick = register;
+                    switchBtn.textContent = 'Giriş Sayfasına Git';
+                } else {
+                    title.textContent = 'Giriş Yap';
+                    primaryBtn.textContent = 'Giriş Yap';
+                    primaryBtn.onclick = login;
+                    switchBtn.textContent = 'Kayıt Sayfasına Git';
+                }
+            }
 
             // Genel API Çağrı Fonksiyonu
             async function apiCall(url, method = 'GET', body = null) {
@@ -1117,7 +1108,6 @@ async def serve_frontend():
                     if (!response.ok) {
                         alert('API Hatası: ' + (data.detail || data.message || 'Bilinmeyen Hata'));
                         if (response.status === 401 || response.status === 403) {
-                            // Yetkilendirme hatası varsa çıkış yap
                             logout();
                         }
                         return null;
@@ -1164,14 +1154,14 @@ async def serve_frontend():
                 localStorage.removeItem('aurionMode');
                 token = null;
                 currentUser = null;
-                document.getElementById('authSection').style.display = 'block';
+                document.getElementById('authSection').style.display = 'flex';
                 document.getElementById('dashboard').style.display = 'none';
-                clearInterval(updateInterval); // Interval'i durdur
+                clearInterval(updateInterval); 
             }
             
             function showDashboard() {
                 if (!token || !currentUser) {
-                    document.getElementById('authSection').style.display = 'flex'; // Dikey hizalama için flex
+                    document.getElementById('authSection').style.display = 'flex'; 
                     document.getElementById('dashboard').style.display = 'none';
                     return;
                 }
@@ -1179,10 +1169,9 @@ async def serve_frontend():
                 document.getElementById('authSection').style.display = 'none';
                 document.getElementById('dashboard').style.display = 'flex';
                 
-                document.getElementById('currentUsernameDisplay').textContent = `Hoş Geldiniz, ${currentUser.username}`;
-                document.getElementById('currentRoleDisplay').textContent = `(${currentUser.role})`;
+                document.getElementById('currentUsernameDisplay').textContent = `${currentUser.username}`;
+                document.getElementById('currentRoleDisplay').textContent = `${currentUser.role}`;
                 
-                // Menü görünürlüğü
                 const isSuperAdmin = currentUser.role === 'super_admin';
                 const isAdmin = currentUser.role === 'admin' || isSuperAdmin;
 
@@ -1190,7 +1179,6 @@ async def serve_frontend():
                 document.getElementById('animeLink').style.display = isSuperAdmin ? 'flex' : 'none';
                 document.getElementById('minecraftLink').style.display = isSuperAdmin ? 'flex' : 'none';
 
-                // Varsayılan sekmeyi yükle
                 switchTab('chat');
                 selectMode(currentMode);
             }
@@ -1203,18 +1191,17 @@ async def serve_frontend():
                 document.querySelector(`.nav-link[data-tab="${tabName}"]`).classList.add('active');
                 document.getElementById(`${tabName}Tab`).classList.add('active');
 
-                // Worker güncellemelerini yönet
                 clearInterval(updateInterval); 
 
                 if (tabName === 'chat') loadChatHistory();
                 else if (tabName === 'admin') loadAdminData();
                 else if (tabName === 'minecraft') {
                     loadBots();
-                    updateInterval = setInterval(loadBots, 5000); // 5 saniyede bir güncelle
+                    updateInterval = setInterval(loadBots, 5000); 
                 }
                 else if (tabName === 'anime') {
                     loadAnimeHistory();
-                    updateInterval = setInterval(loadAnimeHistory, 10000); // 10 saniyede bir güncelle
+                    updateInterval = setInterval(loadAnimeHistory, 10000); 
                 }
             }
 
@@ -1293,21 +1280,21 @@ async def serve_frontend():
                 `).join('') || '<p style="color: var(--text-light);">Yasaklı kullanıcı yok</p>' : '<p style="color: var(--text-light);">Yasaklama verisi yüklenemedi.</p>';
             }
 
-            // Anime Functions
+            // Anime Functions (Revize Edildi)
             async function generateAnime() {
-                const prompt = document.getElementById('animePrompt').value;
+                const script = document.getElementById('animeScript').value;
                 const character = document.getElementById('animeCharacter').value;
                 
-                if (!prompt) {
-                    alert('Lütfen bir anime istemi girin');
+                if (!script) {
+                    alert('Lütfen dublaj metnini (script) girin.');
                     return;
                 }
                 
-                const data = await apiCall('/api/anime/generate', 'POST', {prompt, character});
+                const data = await apiCall('/api/anime/generate', 'POST', {script, character});
                 
                 if (data) {
                     alert(data.message);
-                    document.getElementById('animePrompt').value = '';
+                    document.getElementById('animeScript').value = '';
                     loadAnimeHistory(); 
                 }
             }
@@ -1346,18 +1333,17 @@ async def serve_frontend():
                         card.style.borderLeftColor = statusColor;
                         card.innerHTML = `
                             <strong>${video.character}</strong> <span style="color: ${statusColor};">(${statusText})</span><br>
-                            <small style="color: var(--text-light);">İstem: ${video.prompt.substring(0, 50)}...</small><br>
-                            <small style="display: block; margin-top: 5px;">Script: ${video.script.substring(0, 150)}...</small>
+                            <small style="color: var(--text-light);">Diyalog (İlk 150): ${video.script.substring(0, 150)}...</small>
                             ${mediaContent}
                         `;
                         historyDiv.appendChild(card);
                     });
                 } else {
-                    historyDiv.innerHTML = '<p style="color: var(--text-light);">Henüz oluşturulmuş video yok.</p>';
+                    historyDiv.innerHTML = '<p style="color: var(--text-light);">Henüz oluşturulmuş dublaj yok.</p>';
                 }
             }
 
-            // Minecraft Functions
+            // Minecraft Functions (Aynı Kaldı)
             async function createBot() {
                 const botName = document.getElementById('botName').value;
                 const serverIp = document.getElementById('serverIp').value;
@@ -1393,9 +1379,6 @@ async def serve_frontend():
                         const commandInputId = `cmd_${bot.id}`;
                         const statusColor = bot.status === 'online' ? 'var(--success)' : 'var(--danger)';
                         
-                        // Simülasyon resmi: Botun ID'sine göre her zaman aynı placeholder resmi kullan,
-                        // Worker'ın güncellediği URL'yi kullanmak yerine.
-                        // Bu, Render'da statik dosya yönetimi daha basit olduğu için.
                         const screenUrl = bot.screen_url ? bot.screen_url : '/static/img/sim/default_screen.png';
                         const currentTask = bot.current_task || 'Rölanti';
 
@@ -1434,7 +1417,7 @@ async def serve_frontend():
                 if (data) {
                     alert(data.message);
                     document.getElementById(inputId).value = '';
-                    loadBots(); // Komut gönderildikten hemen sonra listeyi güncelle
+                    loadBots(); 
                 }
             }
 
@@ -1443,8 +1426,6 @@ async def serve_frontend():
                 showDashboard();
             });
 
-            // Demo image path for simulation
-            Path("static/img/sim").mkdir(parents=True, exist_ok=True);
         </script>
     </body>
     </html>
@@ -1453,7 +1434,7 @@ async def serve_frontend():
 
 # Static files (for audio and simulated images/videos)
 Path("static/audio").mkdir(parents=True, exist_ok=True)
-Path("static/img/sim").mkdir(parents=True, exist_ok=True) # Simülasyon resimleri için
+Path("static/img/sim").mkdir(parents=True, exist_ok=True) 
 Path("static/videos").mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -1462,7 +1443,6 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def start_workers():
     print("🚀 [AURION START OK] Gemini istemcisi başarıyla başlatıldı.")
     
-    # Super Admin'in varlığını kontrol et ve kaydet
     if not await db.get_user(SUPER_ADMIN_USERNAME):
         print(">>> [DB INIT] Veritabanı güncelleniyor ve başlangıç kullanıcıları hazırlanıyor.")
         super_admin_user = {
@@ -1476,7 +1456,6 @@ async def start_workers():
         db.data["users"].append(super_admin_user)
         await db.save()
     
-    # Worker'ları başlat
     asyncio.create_task(minecraft_worker_logic())
     asyncio.create_task(anime_producer_logic())
     print(">>> [WORKERS STARTED] Arka plan işleyicileri (Minecraft/Anime) başlatıldı.")
@@ -1485,8 +1464,7 @@ async def start_workers():
 if __name__ == "__main__":
     import uvicorn
     
-    print("🚀 AURION Project v17.1 (Nihai Düzeltme) başlatılıyor...")
+    print("🚀 AURION Project v17.2 (Final Revizyon) başlatılıyor...")
     print("🔐 Super Admin: enes / enes13579")
 
-    # Render.com'da çalışırken gunicorn'un bu kısmı çağırmadığını unutmayın
     uvicorn.run(app, host="0.0.0.0", port=8000)
