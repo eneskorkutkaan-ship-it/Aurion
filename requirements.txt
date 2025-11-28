@@ -4,7 +4,7 @@ pydantic
 passlib
 python-jose
 python-multipart
-# passlib'in bcrypt hashleme şeması için gerekli
+# passlib'in bcrypt hashleme şeması için gerekli ve stabil versiyon
 bcrypt==4.1.2 
 # Gemini API
 google-genai
