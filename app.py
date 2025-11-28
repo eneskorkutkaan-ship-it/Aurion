@@ -1,5 +1,5 @@
 # ==============================================================================
-# AURION PROJESİ - V15.0 (Nihai Stabil Sürüm: UI Görünürlük Garantisi)
+# AURION PROJESİ - V16.0 (Mutlak Görünürlük Garantili Sürüm)
 # ==============================================================================
 
 import os
@@ -479,7 +479,7 @@ def logout():
     return redirect(url_for('login'))
 
 # ==============================================================================
-# 5. GÖMÜLÜ ŞABLONLAR (V15.0: UI Görünürlük Garantisi)
+# 5. GÖMÜLÜ ŞABLONLAR (V16.0: Mutlak Konumlandırma)
 # ==============================================================================
 
 HTML_TEMPLATE = """
@@ -497,7 +497,7 @@ HTML_TEMPLATE = """
             --sidebar-width: 200px;
             --admin-color: #FFA500;
             --super-admin-color: #FFD700;
-            --input-height: 70px; /* Yeni değişken */
+            --input-height: 70px; 
         }
         
         /* KRİTİK: Ana yapıya mutlak yükseklik ve flex zorlaması */
@@ -506,30 +506,51 @@ HTML_TEMPLATE = """
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
             margin: 0; padding: 0; 
             display: flex; 
-            height: 100vh; /* Mutlak yükseklik */
-            min-height: 100vh; /* Garanti yükseklik */
-            overflow: hidden; 
+            height: 100vh; 
+            overflow: hidden; /* Scrollbar'ı body'de engelle */
         }
         .sidebar {
             width: var(--sidebar-width); padding: 20px; background: #1f1f1f; color: var(--text-dark);
             box-shadow: 2px 0 5px rgba(0,0,0,0.3); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
         }
+        
+        /* KRİTİK: Chat Container'a Relative konumlandırma */
         .chat-container { 
             flex-grow: 1; 
-            display: flex; 
-            flex-direction: column; 
-            /* KRİTİK: Yüksekliği kalan alanı doldurmaya zorla */
-            height: 100%; 
+            position: relative; /* Input area'nın absolute konumlanması için referans */
             min-height: 0; 
         }
+
+        /* KRİTİK: Input Area'ya Absolute konumlandırma */
+        .input-area {
+            position: absolute;
+            bottom: 0; /* Ekranın en altına sabitle */
+            left: 0;
+            right: 0;
+            
+            height: var(--input-height); 
+            min-height: var(--input-height); 
+            background: #1f1f1f; 
+            padding: 10px 20px; 
+            box-shadow: 0 -2px 5px rgba(0,0,0,0.3); 
+            z-index: 1000;
+            display: flex; 
+            align-items: center;
+            flex-shrink: 0;
+            box-sizing: border-box; 
+        }
+        
+        /* KRİTİK: Mesaj alanı, input alanının üstünde kalmalı */
         .messages { 
-            flex-grow: 1; 
             overflow-y: auto; 
             padding: 20px; 
-            /* KRİTİK: Yüksekliği hesaplamak için */
-            height: calc(100% - var(--input-height)); 
-            min-height: 1px; /* Boş olsa bile görünür olmasını sağla */
+            /* Yüksekliği, input area'nın boyutu kadar yukarıda bitir */
+            height: calc(100vh - var(--input-height)); 
+            max-height: calc(100vh - var(--input-height));
+            width: 100%;
+            box-sizing: border-box;
         }
+
         .message { 
             margin-bottom: 15px; padding: 10px 15px; border-radius: 18px; max-width: 75%; line-height: 1.5; 
             word-wrap: break-word;
@@ -540,20 +561,7 @@ HTML_TEMPLATE = """
         .ai-message { 
             background: #333; color: white; margin-right: auto; border-bottom-left-radius: 4px; 
         }
-        /* KRİTİK: Sohbet kutusu stilini güçlendiriyoruz */
-        .input-area {
-            height: var(--input-height); 
-            min-height: var(--input-height); 
-            background: #1f1f1f; 
-            padding: 10px 20px; 
-            box-shadow: 0 -2px 5px rgba(0,0,0,0.3); 
-            z-index: 1000;
-            display: flex; 
-            align-items: center;
-            flex-shrink: 0; /* Küçülmesini engelle */
-            width: 100%;
-            box-sizing: border-box; /* Padding dahil boyutu koru */
-        }
+        
         .input-area input {
             flex-grow: 1; padding: 15px; border-radius: 25px; border: 1px solid #555;
             background: #222; color: white; font-size: 16px; box-sizing: border-box; margin-right: 10px;
@@ -594,6 +602,7 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="chat-container">
+        
         <div class="messages" id="messages">
         </div>
         
