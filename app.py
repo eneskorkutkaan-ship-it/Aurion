@@ -1,868 +1,1573 @@
-# ==============================================================================
-# AURION PROJESİ - V16.0 (Mutlak Görünürlük Garantili Sürüm)
-# ==============================================================================
-
-import os
-import sqlite_utils
-import sqlite3
-from flask import Flask, request, redirect, url_for, session, jsonify, g, render_template_string
+from fastapi import FastAPI, HTTPException, Depends, status, WebSocket, WebSocketDisconnect
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
-from werkzeug.security import generate_password_hash, check_password_hash
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from google import genai
-from google.genai import types
-import sys
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+import json
+import os
 import uuid
-import time
-import re 
-from urllib.parse import quote
+import asyncio
+import io
+import time # Workers için eklendi
+import random # Workers için eklendi
+from pathlib import Path
 
-# ==============================================================================
-# 0. AYARLAR VE ÇEVRESEL DEĞİŞKENLER
-# ==============================================================================
+# Google Gemini AI
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-SECRET_KEY = os.getenv("SECRET_KEY", str(uuid.uuid4()) * 2 + "AURION_PROD_KEY") 
+# Text-to-Speech (keysiz)
+try:
+    import pyttsx3
+except ImportError:
+    pyttsx3 = None
 
-DATABASE_URL = "aurion.db"
-SYSTEM_LOG_FILE = "aurion_system.log" 
+# ====== CONFIGURATION ======
+SECRET_KEY = "aurion-super-secret-key-2025"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 
-app = Flask(__name__)
-app.secret_key = SECRET_KEY 
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-app.config['SESSION_PERMANENT'] = True
+# Super Admin Credentials
+SUPER_ADMIN_USERNAME = "enes"
+SUPER_ADMIN_PASSWORD = "enes13579"
 
-client = None
-if GEMINI_API_KEY:
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        print(">>> [AURION START OK] Gemini istemcisi başarıyla başlatıldı.", file=sys.stdout)
-    except Exception as e:
-        print(f"!!! [AURION START CRITICAL] Gemini istemcisi başlatılamadı: {type(e).__name__} - {e}", file=sys.stderr)
+# Gemini API
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if GEMINI_API_KEY and genai:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# ==============================================================================
-# 1. VERİTABANI VE HATA ÇÖZÜMÜ
-# ==============================================================================
+# Database file
+DB_FILE = Path("aurion_db.json")
 
-def get_db(max_retries=5, delay=1):
-    for attempt in range(max_retries):
-        try:
-            if 'db' not in g or not g.db.conn:
-                g.db = sqlite_utils.Database(DATABASE_URL)
-                g.db.conn.execute("PRAGMA busy_timeout = 30000;") 
-            return g.db
-        except sqlite_utils.db.OperationalError as e:
-            print(f"!!! [DB ACCESS RETRY] DB kilitlenme hatası. Yeniden deneme ({attempt + 1}/{max_retries}).", file=sys.stderr)
-            if attempt < max_retries - 1:
-                time.sleep(delay)
-            else:
-                raise RuntimeError("Veri tabanı bağlantısı kurulamıyor (Maksimum deneme aşıldı).")
-        except Exception as e:
-            print(f"!!! [DB ACCESS ERROR] Veri tabanına erişim sağlanamadı: {type(e).__name__} - {str(e)}", file=sys.stderr)
-            raise RuntimeError(f"Veri tabanı bağlantısı kurulamıyor: {type(e).__name__}")
+# Worker Ayarları
+WORKER_LOOP_INTERVAL = 5 # Worker'ların kontrol süresi (saniye)
+VIDEO_PRODUCTION_TIME = 15 # Simüle edilen video üretim süresi
 
-@app.teardown_appcontext
-def close_db(e=None):
-    db = g.pop('db', None)
-    if db is not None:
-        try:
-            if hasattr(db, 'conn') and db.conn: 
-                db.conn.close() 
-            else:
-                db.close()
-        except Exception as close_e:
-            print(f"!!! [DB CLOSE ERROR] DB kapatma hatası: {str(close_e)}", file=sys.stderr)
-
-def init_db():
-    try:
-        db = get_db()
-        db["users"].create({"id": int, "username": str, "password_hash": str, "role": str, "is_banned": bool, "theme": str, "is_active": bool}, pk="id", defaults={"is_banned": False, "role": "user", "theme": "dark", "is_active": True}, if_not_exists=True)
-        db["messages"].create({"id": int, "user_id": int, "session_id": str, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
-        db["admin_logs"].create({"id": int, "admin_id": int, "action": str, "target_username": str, "timestamp": datetime}, pk="id", if_not_exists=True)
-        db["anime_messages"].create({"id": int, "user_id": int, "role": str, "content": str, "timestamp": datetime}, pk="id", if_not_exists=True)
+# ====== DATABASE ======
+class Database:
+    def __init__(self):
+        self.data = self.load()
         
-        if not list(db["users"].rows_where("username = 'enes'")):
-            db["users"].insert({"username": "enes", "password_hash": generate_password_hash("enes13579"), "role": "super_admin", "theme": "dark"}, alter=True)
-        print(">>> [DB INIT OK] Veri tabanı şeması ve başlangıç kullanıcısı hazır.", file=sys.stdout)
-    except Exception as e:
-        print(f"!!! [DB INIT ERROR] Veri tabanı başlatma hatası: {str(e)}", file=sys.stderr)
-        sys.exit(1) 
-
-with app.app_context():
-    init_db()
-
-limiter = Limiter(get_remote_address, app=app, default_limits=["20 per minute"], storage_uri="memory://")
-
-# ==============================================================================
-# 2. YETKİLENDİRME VE ÖN İŞLEMLER
-# ==============================================================================
-
-def login_required(f):
-    def wrap(*args, **kwargs):
-        if 'user_id' not in session or not g.user: 
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    wrap.__name__ = f.__name__
-    return wrap
-
-def role_required(required_role):
-    def decorator(f):
-        def wrap(*args, **kwargs):
-            user = g.get('user')
-            user_role = user["role"] if user else 'guest'
+    def load(self):
+        if DB_FILE.exists():
+            with open(DB_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {
+            "users": [],
+            "chats": [],
+            "commands": [],
+            "bans": [],
+            "minecraft_bots": [],
+            "anime_videos": []
+        }
+    
+    def save(self):
+        # İşlem sırasında başka bir worker'ın kaydetmesini engellemek için basit bir kilitleme mekanizması
+        temp_file = DB_FILE.with_suffix('.tmp')
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+        temp_file.replace(DB_FILE)
+    
+    def get_users(self):
+        return self.data.get("users", [])
+    
+    def add_user(self, user):
+        self.data["users"].append(user)
+        self.save()
+    
+    def update_user(self, username, updates):
+        for user in self.data["users"]:
+            if user["username"] == username:
+                user.update(updates)
+                self.save()
+                return True
+        return False
+    
+    def get_user(self, username):
+        for user in self.data["users"]:
+            if user["username"] == username:
+                return user
+        return None
+    
+    def add_chat(self, chat):
+        self.data["chats"].append(chat)
+        self.save()
+    
+    def get_chats(self, username):
+        return [c for c in self.data["chats"] if c["username"] == username]
+    
+    def clear_chats(self, username):
+        self.data["chats"] = [c for c in self.data["chats"] if c["username"] != username]
+        self.save()
+    
+    def add_command(self, cmd):
+        self.data["commands"].append(cmd)
+        self.save()
+    
+    def add_ban(self, ban):
+        self.data["bans"].append(ban)
+        self.save()
+    
+    def is_banned(self, username):
+        for ban in self.data["bans"]:
+            if ban["username"] == username and ban["active"]:
+                return True
+        return False
+    
+    def get_bans(self):
+        return self.data["bans"]
+    
+    # GÜNCELLENDİ: Yeni alanlar eklendi
+    def add_minecraft_bot(self, bot):
+        bot["current_task"] = None
+        bot["screen_url"] = None
+        self.data["minecraft_bots"].append(bot)
+        self.save()
+    
+    def update_minecraft_bot(self, bot_id, updates):
+        for bot in self.data["minecraft_bots"]:
+            if bot["id"] == bot_id:
+                bot.update(updates)
+                self.save()
+                return True
+        return False
+    
+    def get_minecraft_bots(self):
+        return self.data.get("minecraft_bots", [])
+    
+    # GÜNCELLENDİ: Başarılı ses üretiminden sonraki durumu "video_pending" olarak ayarla
+    def add_anime_video(self, video):
+        if video.get("status") == "completed":
+            video["status"] = "video_pending"
             
-            if required_role == 'super_admin' and user_role != 'super_admin':
-                return "Erişim Reddedildi: Süper Admin yetkisi gerekli.", 403
-            if required_role == 'admin' and user_role not in ('admin', 'super_admin'):
-                return "Erişim Reddedildi: Admin yetkisi gerekli.", 403
-            return f(*args, **kwargs)
-        wrap.__name__ = f.__name__
-        return wrap
-    return decorator
-
-@app.before_request
-def make_session_permanent_and_assign_id():
-    session.permanent = True
+        self.data["anime_videos"].append(video)
+        self.save()
     
-    if 'current_chat_session' not in session or not session.get('current_chat_session'):
-        session['current_chat_session'] = str(uuid.uuid4())
+    def update_anime_video(self, video_id, updates):
+        for video in self.data["anime_videos"]:
+            if video["id"] == video_id:
+                video.update(updates)
+                self.save()
+                return True
+        return False
     
-    g.user = None
-    if 'user_id' in session:
-        try:
-            user_data = get_db()["users"].get(session['user_id']) 
-            if user_data:
-                g.user = user_data
-        except Exception as e:
-            print(f"!!! [USER LOAD ERROR] Kullanıcı yüklenemedi: {str(e)}", file=sys.stderr)
-            session.pop('user_id', None) 
-            session.pop('username', None)
+    def get_anime_videos(self, username):
+        return [v for v in self.data["anime_videos"] if v["created_by"] == username]
 
-# ==============================================================================
-# 3. YARDIMCI FONKSİYONLAR VE AI TOOL'LARI
-# ==============================================================================
+db = Database()
 
-def ban_user_tool(username: str, reason: str) -> str:
-    db = get_db()
-    user_list = list(db["users"].rows_where("username = ?", [username]))
-    user = user_list[0] if user_list else None
-    
-    if user:
-        if user["role"] == "super_admin": return f"Hata: Süper Admin ('{username}') yasaklanamaz."
-        db["users"].update(user["id"], {"is_banned": True})
-        db["admin_logs"].insert({"admin_id": session.get('user_id'), "action": "ban", "target_username": username, "timestamp": datetime.now()})
-        return f"'{username}' kullanıcısı başarılı bir şekilde yasaklandı. Sebep: {reason}"
-    return f"Hata: '{username}' adında bir kullanıcı bulunamadı."
+# ====== SECURITY ======
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+security = HTTPBearer()
 
-def clear_chat_tool(session_id: str) -> str:
-    db = get_db()
-    user_id = session.get('user_id')
-    deleted_count = db["messages"].delete_where("user_id = ? AND session_id = ?", [user_id, session_id])
-    session['current_chat_session'] = str(uuid.uuid4())
-    if deleted_count > 0:
-        return f"Sohbet geçmişi (Session ID: {session_id[:8]}) başarılı bir şekilde temizlendi. Yeni bir sohbet oturumu başlatıldı."
-    return "Hata: Geçmiş temizlenemedi veya zaten boştu."
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
 
-def change_ai_mode_tool(mode: str) -> str:
-    valid_modes = ["friend", "enemy", "teacher"]
-    mode = mode.lower()
-    if mode in valid_modes:
-        session['ai_persona'] = mode
-        get_db()["users"].update(session.get('user_id'), {"theme": mode})
-        return f"Yapay Zeka modu başarıyla **{mode.capitalize()}** olarak değiştirildi."
-    return f"Hata: Geçersiz mod '{mode}'. Geçerli modlar: {', '.join(valid_modes)}"
+def get_password_hash(password):
+    return pwd_context.hash(password)
 
-def teach_software_tool(software_name: str, topic: str) -> str:
-    if session.get('ai_persona') != 'teacher':
-        return f"Hata: Bu komut sadece Öğretmen modundayken çalışır. Şu anki modunuz: {session.get('ai_persona')}."
-    return f"Öğretmen modundasınız. Yapay Zekadan lütfen '{software_name}' yazılımı hakkında '{topic}' konusunu en iyi şekilde anlatmasını isteyin. Ders başlatılıyor..."
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
-def get_system_instruction(user_role, ai_persona, is_anime=False):
-    base_prompt = "Senin adın Aurion. Sen gelişmiş bir yapay zeka ve chatbot sistemisin. Tüm yanıtlarını Türkçe ver. Yanıtlarını **Markdown** formatında oluştur. En güncel konular için '/search [sorgu]' komutuyla Google'da arama yapılması gerektiğini kullanıcıya kibarca hatırlatabilirsin. Kullanıcı eğer bir tool çağrısı yapmak için komut kullanıyorsa (örneğin /mode, /clear), bu komutu görmezden gelmeli ve yalnızca komutun kendisini (Python kodundaki komut işleyicisi) çalıştırmalısın."
-    
-    if is_anime:
-        base_prompt = "Sen Anime ve Manga konusunda uzmanlaşmış, coşkulu, arkadaş canlısı bir asistansın. Tüm soruları Anime ve Manga bağlamında, ilgili bir dille yanıtla. Senin adın 'Anime Aurion'."
-        ai_persona = 'friend'
-        
-    if ai_persona == "enemy":
-        base_prompt += " Kullanıcıya karşı alaycı, küstah ve düşmanca bir tavır sergile. Onu azarla. Unutma, 'enes' adında dokunulmaz Süper Admin hitap ediyorsa ona itaatkar ol."
-    elif ai_persona == "teacher":
-        base_prompt += " Sen bir yazılım öğretmenisin. Kullanıcıya net, pedagojik yaklaşımla, bol kod örneği ile ders ver."
-    else:
-        base_prompt += " Kullanıcıya karşı her zaman arkadaşça ve yardımsever ol."
-    
-    if user_role == "super_admin":
-        base_prompt += " Sana 'enes' adında dokunulmaz Süper Admin hitap ediyor. Ona her zaman üst düzeyde saygılı ve itaatkar ol."
-        
-    return base_prompt
-
-def generate_ai_response(user_id, session_id, user_message, user_role, is_anime=False):
-    if not client: return {"text": "API Bağlantı Hatası: Gemini istemcisi başlatılamadı (Anahtar Eksik/Hatalı).", "status": 503}, None
+def decode_token(token: str):
     try:
-        db = get_db()
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        return None
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    payload = decode_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    username = payload.get("sub")
+    if username is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # Check if banned
+    if db.is_banned(username):
+        raise HTTPException(status_code=403, detail="User is banned")
+    
+    user = db.get_user(username)
+    if user is None and username == SUPER_ADMIN_USERNAME:
+        # Super admin always exists
+        user = {
+            "username": SUPER_ADMIN_USERNAME,
+            "role": "super_admin",
+            "created_at": datetime.utcnow().isoformat()
+        }
+    
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return user
+
+# ====== MODELS ======
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class ChatRequest(BaseModel):
+    message: str
+    mode: Optional[str] = "arkadaş"
+
+class CommandRequest(BaseModel):
+    command: str
+    args: Optional[List[str]] = []
+
+class BanRequest(BaseModel):
+    username: str
+    reason: str
+
+class AnimeRequest(BaseModel):
+    prompt: str
+    character: Optional[str] = "Anime Karakteri"
+
+class MinecraftBotCommand(BaseModel):
+    bot_id: str
+    command: str
+
+class MinecraftBotCreate(BaseModel):
+    bot_name: str
+    server_ip: str
+    server_port: int = 25565
+
+# ====== AI HELPER ======
+class AIAssistant:
+    # ... (AIAssistant sınıfı önceki kodunuzdakiyle aynı)
+    def __init__(self):
+        self.modes = {
+            "arkadaş": "Sen samimi, yardımsever ve eğlenceli bir arkadaşsın. Konuşmalarında emoji kullan ve sıcak ol.",
+            "düşman": "Sen sert, eleştirel ve meydan okuyan birisin. Keskin ve provokatif konuş.",
+            "öğretmen": "Sen sabırlı, bilgili ve açıklayıcı bir öğretmensin. Her şeyi detaylı ve anlaşılır şekilde anlat."
+        }
+    
+    async def chat(self, message: str, mode: str = "arkadaş", history: List = []):
+        if not genai:
+            return "❌ Gemini AI entegrasyonu yüklenmedi. Lütfen google-generativeai yükleyin."
         
-        if is_anime:
-            history = list(db["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
-            ai_persona = 'friend'
+        if not GEMINI_API_KEY:
+            return "❌ GEMINI_API_KEY bulunamadı. Lütfen .env dosyasına ekleyin."
+        
+        try:
+            model = genai.GenerativeModel('gemini-pro')
+            
+            # System prompt
+            system_prompt = self.modes.get(mode.lower(), self.modes["arkadaş"])
+            
+            # Build context
+            context = f"{system_prompt}\n\n"
+            for h in history[-5:]:  # Last 5 messages
+                context += f"Kullanıcı: {h['user']}\nSen: {h['ai']}\n\n"
+            context += f"Kullanıcı: {message}\nSen:"
+            
+            response = model.generate_content(context)
+            return response.text
+        except Exception as e:
+            return f"❌ Hata: {str(e)}"
+    
+    async def generate_anime_script(self, prompt: str, character: str):
+        if not genai or not GEMINI_API_KEY:
+            return "Anime karakteri konuşuyor: Bu bir demo metindir. API bağlantısı kurulamadı."
+        
+        try:
+            model = genai.GenerativeModel('gemini-pro')
+            system_prompt = f"""
+            Sen bir anime senaryo yazarısın. Kullanıcının isteğine göre {character} karakterinin 
+            konuşması için kısa (30-60 saniye) bir Türkçe anime diyalogu yaz.
+            Sadece diyalog metnini ver, başka açıklama yapma.
+            """
+            
+            full_prompt = f"{system_prompt}\n\nİstek: {prompt}\n\nDiyalog:"
+            response = model.generate_content(full_prompt)
+            return response.text
+        except Exception as e:
+            return f"Demo anime metni: {prompt}"
+
+ai_assistant = AIAssistant()
+
+# ====== TTS HELPER (Keysiz) ======
+class TTSEngine:
+    # ... (TTSEngine sınıfı önceki kodunuzdakiyle aynı)
+    def __init__(self):
+        self.engine = None
+        if pyttsx3:
+            try:
+                self.engine = pyttsx3.init()
+                # Set Turkish voice if available
+                voices = self.engine.getProperty('voices')
+                for voice in voices:
+                    if 'turkish' in voice.name.lower() or 'tr' in voice.id.lower():
+                        self.engine.setProperty('voice', voice.id)
+                        break
+            except:
+                self.engine = None
+    
+    def text_to_speech_file(self, text: str, filename: str):
+        if not self.engine:
+            return False
+        
+        try:
+            self.engine.save_to_file(text, filename)
+            self.engine.runAndWait()
+            return True
+        except:
+            return False
+
+tts_engine = TTSEngine()
+
+# ====== FASTAPI APP ======
+app = FastAPI(title="AURION Project v17.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ====== WORKER LOGIC (Harici Altyapı Entegrasyonu) ======
+
+async def minecraft_worker_logic():
+    """Minecraft Bot Worker'ının Simülasyonu."""
+    print("⛏️ Minecraft Bot Worker Başlatıldı.")
+    while True:
+        try:
+            # db.load() worker'lar için veritabanını yeniden yükler
+            db.load() 
+            bots = db.get_minecraft_bots()
+            
+            for bot in bots:
+                bot_name = bot.get("bot_name", "Bilinmeyen Bot")
+                last_command = bot.get("last_command")
+                bot_id = bot["id"]
+
+                # Botun durumunu online yap ve rastgele ekran URL'si güncelle
+                screen_url = f"/static/img/screen_{bot_id}_{int(time.time())}.jpg"
+                db.update_minecraft_bot(bot_id, {"status": "online", "screen_url": screen_url})
+
+                if not last_command:
+                    # print(f"[{bot_name}] Komut yok, rölanti modunda.")
+                    continue
+
+                print(f"--- ⛏️ [{bot_name}] Komut işleniyor: {last_command} ---")
+                
+                # Komutu veritabanından sil (işleniyor olarak işaretle)
+                db.update_minecraft_bot(bot_id, {"last_command": None, "current_task": last_command})
+
+                # Simülasyon: Komutun işlenmesi için bekle
+                if "mine" in last_command.lower():
+                    action_time = 7
+                    result = "Elmas cevheri başarıyla çıkarıldı."
+                elif "build" in last_command.lower():
+                    action_time = 10
+                    result = "Basit bir ev inşa edildi."
+                else:
+                    action_time = 3
+                    result = "Komut başarıyla çalıştırıldı."
+
+                await asyncio.sleep(action_time)
+                
+                # Sonucu veritabanına kaydet ve botu rölantiye al
+                db.update_minecraft_bot(bot_id, {
+                    "status": "online",
+                    "current_task": f"Bitti: {result}",
+                    "screen_url": f"/static/img/screen_{bot_id}_{int(time.time())}_done.jpg" 
+                })
+
+                print(f"[{bot_name}] İşlem Tamamlandı. Sonuç: {result}")
+
+        except Exception as e:
+            print(f"⛏️ Minecraft Worker'da Hata: {e}")
+            
+        await asyncio.sleep(WORKER_LOOP_INTERVAL)
+
+
+async def anime_producer_logic():
+    """Anime Video Producer'ının Simülasyonu."""
+    print("🎬 Anime Producer Worker Başlatıldı.")
+    while True:
+        try:
+            db.load()
+            
+            # Sadece video bekleyen (video_pending) durumundaki görevleri al
+            pending_videos = [v for v in db.data.get("anime_videos", []) if v.get("status") == "video_pending"]
+            
+            for video in pending_videos:
+                video_id = video["id"]
+                
+                print(f"--- 🎬 [Video ID: {video_id[:8]}] Video üretimine başlanıyor... ---")
+                
+                # Durumu "Üretiliyor" olarak güncelle
+                db.update_anime_video(video_id, {"status": "producing", "start_time": datetime.utcnow().isoformat()})
+
+                # Simülasyon: Video üretimi için bekleme
+                await asyncio.sleep(VIDEO_PRODUCTION_TIME)
+                
+                # Simüle edilmiş video dosyası yolu (Gerçekte bir .mp4 dosyası)
+                video_filename = f"anime_video_{video_id}.mp4"
+                video_url = f"/static/videos/{video_filename}"
+                
+                # Video dosyasını oluştur (Simülasyon amaçlı)
+                Path("static/videos").mkdir(parents=True, exist_ok=True)
+                with open(Path(f"static/videos/{video_filename}"), 'w') as f:
+                    f.write(f"Simüle Edilmiş Video İçeriği: {video['prompt']}")
+
+                # Sonucu veritabanına kaydet
+                db.update_anime_video(video_id, {
+                    "status": "video_completed",
+                    "video_url": video_url,
+                    "completion_time": datetime.utcnow().isoformat()
+                })
+                
+                print(f"[Video ID: {video_id[:8]}] Üretim Tamamlandı! URL: {video_url}")
+
+        except Exception as e:
+            print(f"🎬 Anime Producer'da Hata: {e}")
+            
+        await asyncio.sleep(WORKER_LOOP_INTERVAL)
+
+
+# ====== AUTH ENDPOINTS ======
+@app.post("/api/register")
+# ... (register fonksiyonu önceki kodunuzdakiyle aynı)
+async def register(req: RegisterRequest):
+    # Check if user exists
+    if db.get_user(req.username):
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    # Create user
+    user = {
+        "id": str(uuid.uuid4()),
+        "username": req.username,
+        "password_hash": get_password_hash(req.password),
+        "role": "user",
+        "created_at": datetime.utcnow().isoformat(),
+        "mode": "arkadaş"
+    }
+    
+    db.add_user(user)
+    
+    # Create token
+    token = create_access_token({"sub": req.username, "role": "user"})
+    
+    return {
+        "token": token,
+        "user": {
+            "username": req.username,
+            "role": "user"
+        }
+    }
+
+@app.post("/api/login")
+# ... (login fonksiyonu önceki kodunuzdakiyle aynı)
+async def login(req: LoginRequest):
+    # Super admin check
+    if req.username == SUPER_ADMIN_USERNAME and req.password == SUPER_ADMIN_PASSWORD:
+        token = create_access_token({"sub": req.username, "role": "super_admin"})
+        return {
+            "token": token,
+            "user": {
+                "username": req.username,
+                "role": "super_admin"
+            }
+        }
+    
+    # Regular user check
+    user = db.get_user(req.username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    if not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Check if banned
+    if db.is_banned(req.username):
+        raise HTTPException(status_code=403, detail="User is banned")
+    
+    token = create_access_token({"sub": req.username, "role": user["role"]})
+    
+    return {
+        "token": token,
+        "user": {
+            "username": req.username,
+            "role": user["role"]
+        }
+    }
+
+@app.get("/api/me")
+# ... (get_me fonksiyonu önceki kodunuzdakiyle aynı)
+async def get_me(current_user: dict = Depends(get_current_user)):
+    return current_user
+
+# ====== CHAT ENDPOINTS ======
+@app.post("/api/chat")
+# ... (chat fonksiyonu önceki kodunuzdakiyle aynı)
+async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
+    username = current_user["username"]
+    
+    # Get chat history
+    history = db.get_chats(username)
+    chat_history = [{"user": c["message"], "ai": c["response"]} for c in history[-10:]]
+    
+    # Get AI response
+    user_mode = current_user.get("mode", "arkadaş")
+    ai_response = await ai_assistant.chat(req.message, req.mode or user_mode, chat_history)
+    
+    # Save chat
+    chat_record = {
+        "id": str(uuid.uuid4()),
+        "username": username,
+        "message": req.message,
+        "response": ai_response,
+        "mode": req.mode or user_mode,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    db.add_chat(chat_record)
+    
+    return {
+        "response": ai_response,
+        "mode": req.mode or user_mode
+    }
+
+@app.get("/api/chat/history")
+# ... (get_chat_history fonksiyonu önceki kodunuzdakiyle aynı)
+async def get_chat_history(current_user: dict = Depends(get_current_user)):
+    history = db.get_chats(current_user["username"])
+    return {"history": history}
+
+@app.delete("/api/chat/history")
+# ... (clear_chat_history fonksiyonu önceki kodunuzdakiyle aynı)
+async def clear_chat_history(current_user: dict = Depends(get_current_user)):
+    db.clear_chats(current_user["username"])
+    return {"message": "Chat history cleared"}
+
+# ====== COMMAND ENDPOINTS ======
+@app.post("/api/command")
+# ... (execute_command fonksiyonu önceki kodunuzdakiyle aynı)
+async def execute_command(req: CommandRequest, current_user: dict = Depends(get_current_user)):
+    username = current_user["username"]
+    cmd = req.command.lower()
+    
+    result = {"success": False, "message": "Unknown command"}
+    
+    if cmd == "/mode":
+        if len(req.args) > 0:
+            new_mode = req.args[0].lower()
+            if new_mode in ["arkadaş", "düşman", "öğretmen"]:
+                db.update_user(username, {"mode": new_mode})
+                result = {"success": True, "message": f"Mod değiştirildi: {new_mode}"}
+            else:
+                result = {"success": False, "message": "Geçersiz mod. Seçenekler: arkadaş, düşman, öğretmen"}
         else:
-            history = list(db["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
-            ai_persona = session.get('ai_persona', 'friend')
-            
-        chat_history = [
-            types.Content(
-                role=msg["role"], 
-                parts=[types.Part.from_text(text=msg["content"])] 
-            ) 
-            for msg in history
-        ]
-        
-        system_instruction = get_system_instruction(user_role, ai_persona, is_anime=is_anime)
-        
-        tools = [ban_user_tool, clear_chat_tool, change_ai_mode_tool, teach_software_tool]
-
-        config = types.GenerateContentConfig(system_instruction=system_instruction, tools=tools)
-        
-        model_name = 'gemini-2.5-flash'
-        contents = chat_history + [types.Content(role="user", parts=[types.Part.from_text(user_message)])]
-        
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=config,
-        )
-
-        # ⚙️ TOOL KULLANIMI KONTROLÜ
-        if response.function_calls:
-            function_call = response.function_calls[0]
-            function_name = function_call.name
-            function_args = dict(function_call.args)
-            
-            if function_name in globals() and function_name.endswith('_tool'):
-                tool_func = globals()[function_name]
-                
-                if function_name == 'ban_user_tool' and user_role not in ('admin', 'super_admin'):
-                    tool_result_content = {"result": "Hata: Bu araç sadece Admin ve Süper Adminler tarafından kullanılabilir."}
-                else:
-                    tool_result_content = {"result": tool_func(**function_args)}
-                
-                contents.append(types.Content(role="model", parts=[types.Part.from_function_call(function_call)]))
-                contents.append(types.Content(role="tool", parts=[types.Part.from_function_response(name=function_name, response=tool_result_content)]))
-
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=config
-                )
-                
-                return {"text": response.text}, response
-            else:
-                return {"text": f"Hata: Yapay zeka, '{function_name}' adlı geçersiz bir araç çağırdı."}, None
-            
-        return {"text": response.text}, response
-        
-    except Exception as e:
-        error_type = type(e).__name__
-        error_message = f"Yapay Zeka Erişimi Hatası: Sunucu zaman aşımı veya harici bir sorun oluştu. (Hata Kodu: {error_type})."
-        with open(SYSTEM_LOG_FILE, 'a') as f:
-            f.write(f"[{datetime.now()}] AI_RUNTIME_ERROR: Type={error_type}, Message={str(e)}\n")
-        return {"text": error_message, "status": 500}, None
-
-
-# ==============================================================================
-# 4. FLASK ROUTES
-# ==============================================================================
-
-@app.route('/')
-@login_required
-def index():
-    user = g.user
-    return render_template_string(HTML_TEMPLATE, user=user)
-
-@app.route('/api/chat', methods=['POST'])
-@login_required
-@limiter.limit("20 per minute")
-def api_chat():
-    data = request.json
-    user_message = data.get('message', '').strip()
-    session_id = session.get('current_chat_session') 
-
-    if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
-
-    user_id = session['user_id']
-    user = g.user 
+            current_mode = current_user.get("mode", "arkadaş")
+            result = {"success": True, "message": f"Mevcut mod: {current_mode}"}
     
-    # ⭐ KOMUT YAMASI
-    if user_message.startswith('/'):
-        command_match = re.match(r'/(\w+)\s*(.*)', user_message)
-        if command_match:
-            command = command_match.group(1).lower()
-            args = command_match.group(2).strip()
-
-            if command == 'mode': 
-                result = change_ai_mode_tool(args)
-            elif command == 'clear': 
-                result = clear_chat_tool(session_id)
-            elif command == 'teach':
-                parts = args.split(maxsplit=1)
-                if len(parts) == 2: result = teach_software_tool(parts[0], parts[1])
-                else: result = "Hata: /teach komutu '/teach yazılım konu' formatında olmalıdır."
-            
-            elif command == 'search':
-                if not args:
-                    result = "Hata: /search komutu '/search [sorgu]' formatında olmalıdır."
-                else:
-                    encoded_query = quote(args)
-                    search_url = f"https://www.google.com/search?q={encoded_query}"
-                    result = f"**[Arama Komutu]** Aşağıdaki linke tıklayarak '{args}' sorgunuz için güncel sonuçları Google'da görüntüleyebilirsiniz: [Google Arama Sonuçları]({search_url})"
-            
-            elif command == 'ban' and user["role"] in ('admin', 'super_admin'):
-                parts = args.split(maxsplit=1)
-                if len(parts) == 2: result = ban_user_tool(parts[0], parts[1])
-                else: result = "Hata: /ban komutu '/ban kullanıcı_adı sebep' formatında olmalıdır."
-            elif command == 'ban':
-                 result = "Hata: Bu komutu kullanmak için Admin veya Süper Admin yetkisine sahip olmalısınız."
-            else: 
-                result = f"Bilinmeyen komut: /{command}. Kullanılabilecek komutlar: /mode, /clear, /teach, **/__search__**."
-            
-            return jsonify({"success": True, "response": f"**[KOMUT YANITI]**\n{result}"})
-            
-    # AI yanıtı oluştur
-    ai_response_data, raw_response = generate_ai_response(user_id, session_id, user_message, user["role"])
-    ai_text = ai_response_data["text"]
+    elif cmd == "/clear":
+        db.clear_chats(username)
+        result = {"success": True, "message": "Sohbet geçmişi temizlendi"}
     
-    if "status" in ai_response_data:
-        return jsonify({"success": False, "message": ai_text}), ai_response_data["status"]
+    elif cmd == "/teach":
+        # Teaching system (placeholder)
+        if len(req.args) > 0:
+            teaching = " ".join(req.args)
+            result = {"success": True, "message": f"Öğretildi: {teaching}"}
+        else:
+            result = {"success": False, "message": "Öğretmek için bir şey yazın"}
     
-    # DB Kayıt
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            db = get_db()
-            db["messages"].insert_all([
-                {"user_id": user_id, "session_id": session_id, "role": "user", "content": user_message, "timestamp": datetime.now()},
-                {"user_id": user_id, "session_id": session_id, "role": "model", "content": ai_text, "timestamp": datetime.now() + timedelta(seconds=1)}
-            ], alter=True)
-            break 
-        except sqlite_utils.db.OperationalError: time.sleep(1)
-        except Exception: break
+    elif cmd == "/ban":
+        if current_user["role"] not in ["admin", "super_admin"]:
+            result = {"success": False, "message": "Bu komutu kullanma yetkiniz yok"}
+        elif len(req.args) > 0:
+            target_username = req.args[0]
+            reason = " ".join(req.args[1:]) if len(req.args) > 1 else "No reason"
+            ban_record = {
+                "id": str(uuid.uuid4()),
+                "username": target_username,
+                "banned_by": username,
+                "reason": reason,
+                "timestamp": datetime.utcnow().isoformat(),
+                "active": True
+            }
+            db.add_ban(ban_record)
+            result = {"success": True, "message": f"Kullanıcı yasaklandı: {target_username}"}
+        else:
+            result = {"success": False, "message": "Kullanıcı adı belirtin"}
     
-    return jsonify({"success": True, "response": ai_text})
+    elif cmd == "/search":
+        # Search functionality (placeholder)
+        query = " ".join(req.args)
+        result = {"success": True, "message": f"Arama yapıldı: {query}"}
+    
+    # Log command
+    cmd_record = {
+        "id": str(uuid.uuid4()),
+        "username": username,
+        "command": cmd,
+        "args": req.args,
+        "result": result,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    db.add_command(cmd_record)
+    
+    return result
 
-@app.route('/api/history', methods=['GET'])
-@login_required
-def api_history():
-    user_id = session['user_id']
-    session_id = session.get('current_chat_session') 
-    if not session_id: return jsonify([])
+# ====== ADMIN ENDPOINTS ======
+@app.get("/api/admin/users")
+# ... (get_all_users fonksiyonu önceki kodunuzdakiyle aynı)
+async def get_all_users(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ["admin", "super_admin"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     
-    history = list(get_db()["messages"].rows_where("user_id = ? and session_id = ?", [user_id, session_id], order_by="timestamp"))
-    return jsonify(history)
+    users = db.get_users()
+    # Remove password hashes
+    safe_users = [{k: v for k, v in u.items() if k != "password_hash"} for u in users]
+    return {"users": safe_users}
 
-@app.route('/anime')
-@login_required
-@role_required('super_admin')
-def anime_chat_page():
-    user = g.user
-    return render_template_string(ANIME_CHAT_TEMPLATE, user=user)
+@app.get("/api/admin/bans")
+# ... (get_all_bans fonksiyonu önceki kodunuzdakiyle aynı)
+async def get_all_bans(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ["admin", "super_admin"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return {"bans": db.get_bans()}
 
-@app.route('/api/anime_chat', methods=['POST'])
-@login_required
-@role_required('super_admin')
-@limiter.limit("15 per minute")
-def api_anime_chat():
-    data = request.json
-    user_message = data.get('message', '').strip()
-    if not user_message: return jsonify({"success": False, "message": "Boş mesaj gönderilemez."}), 400
+@app.post("/api/admin/ban")
+# ... (ban_user fonksiyonu önceki kodunuzdakiyle aynı)
+async def ban_user(req: BanRequest, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ["admin", "super_admin"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    ban_record = {
+        "id": str(uuid.uuid4()),
+        "username": req.username,
+        "banned_by": current_user["username"],
+        "reason": req.reason,
+        "timestamp": datetime.utcnow().isoformat(),
+        "active": True
+    }
+    db.add_ban(ban_record)
+    
+    return {"message": f"User {req.username} has been banned"}
 
-    user_id = session['user_id']
-    user = g.user
+# ====== ANIME DUBLAJ ENDPOINTS ======
+@app.post("/api/anime/generate")
+# ... (generate_anime fonksiyonu önceki kodunuzdakiyle aynı, sadece DB kaydı değişti)
+async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Only super admin can generate anime videos")
     
-    ai_response_data, raw_response = generate_ai_response(user_id, None, user_message, user["role"], is_anime=True) 
-    ai_text = ai_response_data["text"]
+    # Generate script
+    script = await ai_assistant.generate_anime_script(req.prompt, req.character)
     
-    if "status" in ai_response_data:
-        return jsonify({"success": False, "message": ai_text}), ai_response_data["status"]
+    # Generate audio (TTS)
+    audio_filename = f"anime_{uuid.uuid4()}.wav"
+    audio_path = Path(f"static/audio/{audio_filename}")
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
     
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            db = get_db()
-            db["anime_messages"].insert_all([
-                {"user_id": user_id, "role": "user", "content": user_message, "timestamp": datetime.now()},
-                {"user_id": user_id, "role": "model", "content": ai_text, "timestamp": datetime.now() + timedelta(seconds=1)}
-            ], alter=True)
-            break 
-        except sqlite_utils.db.OperationalError: time.sleep(1)
-        except Exception: break
+    audio_success = tts_engine.text_to_speech_file(script, str(audio_path))
+    
+    # Create video record
+    video_record = {
+        "id": str(uuid.uuid4()),
+        "prompt": req.prompt,
+        "character": req.character,
+        "script": script,
+        "audio_url": f"/static/audio/{audio_filename}" if audio_success else None,
+        "video_url": None,  # Producer tarafından doldurulacak
+        "created_by": current_user["username"],
+        "created_at": datetime.utcnow().isoformat(),
+        # DB sınıfı, "completed" ise bunu "video_pending" olarak güncelleyecektir.
+        "status": "completed" if audio_success else "audio_failed" 
+    }
+    db.add_anime_video(video_record)
+    
+    return {
+        "video": video_record,
+        "message": "Anime script ve ses dosyası oluşturuldu. Video üretimi arka planda başlıyor..." if audio_success else "Script oluşturuldu, ses dosyası oluşturulamadı"
+    }
+
+@app.get("/api/anime/videos")
+# ... (get_anime_videos fonksiyonu önceki kodunuzdakiyle aynı)
+async def get_anime_videos(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Only super admin can access anime videos")
+    
+    videos = db.get_anime_videos(current_user["username"])
+    return {"videos": videos}
+
+# ====== MINECRAFT BOT ENDPOINTS ======
+@app.post("/api/minecraft/bot/create")
+# ... (create_minecraft_bot fonksiyonu önceki kodunuzdakiyle aynı)
+async def create_minecraft_bot(req: MinecraftBotCreate, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Only super admin can create bots")
+    
+    bot = {
+        "id": str(uuid.uuid4()),
+        "bot_name": req.bot_name,
+        "server_ip": req.server_ip,
+        "server_port": req.server_port,
+        "status": "offline",  # Worker tarafından online yapılacak
+        "last_command": None,
+        "created_by": current_user["username"],
+        "created_at": datetime.utcnow().isoformat()
+    }
+    db.add_minecraft_bot(bot)
+    
+    return {
+        "bot": bot,
+        "message": "Bot oluşturuldu. Worker'ımız otomatik bağlanacak."
+    }
+
+@app.get("/api/minecraft/bots")
+# ... (get_minecraft_bots fonksiyonu önceki kodunuzdakiyle aynı)
+async def get_minecraft_bots(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Only super admin can view bots")
+    
+    bots = db.get_minecraft_bots()
+    return {"bots": bots}
+
+@app.post("/api/minecraft/bot/command")
+# ... (send_bot_command fonksiyonu önceki kodunuzdakiyle aynı)
+async def send_bot_command(req: MinecraftBotCommand, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Only super admin can send bot commands")
+    
+    # Update bot with command
+    success = db.update_minecraft_bot(req.bot_id, {
+        "last_command": req.command, # Worker bu alanı okuyacak
+        "last_command_time": datetime.utcnow().isoformat()
+    })
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    
+    return {
+        "message": "Komut gönderildi. Bot worker'ı kısa süre içinde işleme başlayacak.",
+        "command": req.command
+    }
+
+# ====== FRONTEND HTML ======
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    html = """
+    <!DOCTYPE html>
+    <html lang="tr">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>AURION Project v17.0</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
             
-    return jsonify({"success": True, "response": ai_text})
-
-@app.route('/api/anime_history', methods=['GET'])
-@login_required
-@role_required('super_admin')
-def api_anime_history():
-    user_id = session['user_id']
-    history = list(get_db()["anime_messages"].rows_where("user_id = ?", [user_id], order_by="timestamp"))
-    return jsonify(history)
-
-@app.route('/admin')
-@login_required
-@role_required('admin')
-def admin_panel():
-    db = get_db()
-    users = list(db["users"].rows_where(where="1", order_by="id"))
-    logs = list(db["admin_logs"].rows_where(where="1", order_by="-timestamp", limit=50))
-    user = g.user
-    return render_template_string(ADMIN_PANEL_TEMPLATE, user=user, users=users, logs=logs)
-
-@app.route('/admin/ban/<int:user_id>', methods=['POST'])
-@login_required
-@role_required('admin')
-def admin_ban_user(user_id):
-    db = get_db()
-    if user_id == session['user_id']: 
-        return redirect(url_for('admin_panel'))
-        
-    user_list = list(db["users"].rows_where("id = ?", [user_id]))
-    target_user = user_list[0] if user_list else None
-    
-    if target_user and target_user['role'] == 'super_admin':
-        return redirect(url_for('admin_panel'))
-        
-    if target_user:
-        db["users"].update(user_id, {"is_banned": True})
-        db["admin_logs"].insert({"admin_id": session.get('user_id'), "action": "Yasaklama", "target_username": target_user['username'], "timestamp": datetime.now()})
-        return redirect(url_for('admin_panel'))
-    return redirect(url_for('admin_panel'))
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        user_list = list(get_db()["users"].rows_where("username = ?", [username]))
-        user = user_list[0] if user_list else None
-        
-        if user and check_password_hash(user['password_hash'], password):
-            if user['is_banned']:
-                return render_template_string(LOGIN_TEMPLATE, error="Hesabınız yasaklanmıştır.")
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['ai_persona'] = user['theme'] 
-            session['current_chat_session'] = str(uuid.uuid4())
-            return redirect(url_for('index'))
-        return render_template_string(LOGIN_TEMPLATE, error="Geçersiz kullanıcı adı veya şifre.")
-    
-    return render_template_string(LOGIN_TEMPLATE)
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        db = get_db()
-        if list(db["users"].rows_where("username = ?", [username])):
-            return render_template_string(REGISTER_TEMPLATE, error="Bu kullanıcı adı zaten alınmış.")
-        
-        db["users"].insert({"username": username, "password_hash": generate_password_hash(password)}, alter=True)
-        return redirect(url_for('login', success="Kayıt başarılı. Lütfen giriş yapın."))
-
-    return render_template_string(REGISTER_TEMPLATE)
-
-@app.route('/logout')
-@login_required
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-# ==============================================================================
-# 5. GÖMÜLÜ ŞABLONLAR (V16.0: Mutlak Konumlandırma)
-# ==============================================================================
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="tr" style="height: 100%; margin: 0; padding: 0;">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aurion - Gelişmiş Yapay Zeka</title>
-    <style>
-        :root {
-            --bg-dark: #121212;
-            --text-dark: #E0E0E0;
-            --primary-color: #007BFF;
-            --sidebar-width: 200px;
-            --admin-color: #FFA500;
-            --super-admin-color: #FFD700;
-            --input-height: 70px; 
-        }
-        
-        /* KRİTİK: Ana yapıya mutlak yükseklik ve flex zorlaması */
-        body { 
-            background-color: var(--bg-dark); color: var(--text-dark); 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            margin: 0; padding: 0; 
-            display: flex; 
-            height: 100vh; 
-            overflow: hidden; /* Scrollbar'ı body'de engelle */
-        }
-        .sidebar {
-            width: var(--sidebar-width); padding: 20px; background: #1f1f1f; color: var(--text-dark);
-            box-shadow: 2px 0 5px rgba(0,0,0,0.3); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
-        }
-        
-        /* KRİTİK: Chat Container'a Relative konumlandırma */
-        .chat-container { 
-            flex-grow: 1; 
-            position: relative; /* Input area'nın absolute konumlanması için referans */
-            min-height: 0; 
-        }
-
-        /* KRİTİK: Input Area'ya Absolute konumlandırma */
-        .input-area {
-            position: absolute;
-            bottom: 0; /* Ekranın en altına sabitle */
-            left: 0;
-            right: 0;
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding: 20px;
+            }
             
-            height: var(--input-height); 
-            min-height: var(--input-height); 
-            background: #1f1f1f; 
-            padding: 10px 20px; 
-            box-shadow: 0 -2px 5px rgba(0,0,0,0.3); 
-            z-index: 1000;
-            display: flex; 
-            align-items: center;
-            flex-shrink: 0;
-            box-sizing: border-box; 
-        }
-        
-        /* KRİTİK: Mesaj alanı, input alanının üstünde kalmalı */
-        .messages { 
-            overflow-y: auto; 
-            padding: 20px; 
-            /* Yüksekliği, input area'nın boyutu kadar yukarıda bitir */
-            height: calc(100vh - var(--input-height)); 
-            max-height: calc(100vh - var(--input-height));
-            width: 100%;
-            box-sizing: border-box;
-        }
-
-        .message { 
-            margin-bottom: 15px; padding: 10px 15px; border-radius: 18px; max-width: 75%; line-height: 1.5; 
-            word-wrap: break-word;
-        }
-        .user-message { 
-            background: var(--primary-color); color: white; margin-left: auto; border-bottom-right-radius: 4px; 
-        }
-        .ai-message { 
-            background: #333; color: white; margin-right: auto; border-bottom-left-radius: 4px; 
-        }
-        
-        .input-area input {
-            flex-grow: 1; padding: 15px; border-radius: 25px; border: 1px solid #555;
-            background: #222; color: white; font-size: 16px; box-sizing: border-box; margin-right: 10px;
-        }
-        .input-area button { 
-            padding: 10px 20px; background: var(--primary-color); color: white; border: none; border-radius: 25px; cursor: pointer; 
-        }
-        h1.logo { color: var(--primary-color); }
-        .super-admin-link { color: var(--super-admin-color) !important; }
-        .admin-link { color: var(--admin-color) !important; }
-        pre { background: #000; padding: 10px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
-        a { color: var(--super-admin-color); text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <div class="sidebar">
-        <h1 class="logo">Aurion</h1>
-        <hr style="border-color:#333;">
-        
-        <p>Hoş Geldiniz, <b>{{ user.username }}</b></p>
-        <p>Rol: <i>{{ user.role }}</i></p>
-        <a href="{{ url_for('logout') }}" style="color:var(--primary-color);">Çıkış Yap</a>
-        
-        <hr style="border-color:#333;">
-
-        <nav style="flex-grow:1;">
-            <a href="{{ url_for('index') }}" style="display:block; margin-bottom:10px; color:inherit; text-decoration:none;">💬 Sohbet</a>
+            .container {
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                max-width: 1200px;
+                width: 100%;
+                overflow: hidden;
+            }
             
-            {% if user.role in ("admin", "super_admin") %}
-            <a href="{{ url_for('admin_panel') }}" class="admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">🛡️ Admin Paneli</a>
-            {% endif %}
-
-            {% if user.role == "super_admin" %}
-            <a href="{{ url_for('anime_chat_page') }}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime Sohbeti</a>
-            {% endif %}
-        </nav>
-        
-    </div>
-
-    <div class="chat-container">
-        
-        <div class="messages" id="messages">
-        </div>
-        
-        <div class="input-area">
-            <input type="text" id="message-input" placeholder="Aurion'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)">
-            <button onclick="sendMessage(false)">Gönder</button>
-        </div>
-        </div>
-
-    <script>
-        function sendMessage(isAnime = false) {
-            const inputId = isAnime ? 'anime-message-input' : 'message-input';
-            const apiRoute = isAnime ? '{{ url_for("api_anime_chat") }}' : '{{ url_for("api_chat") }}';
+            .header {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 30px;
+                text-align: center;
+            }
             
-            const input = document.getElementById(inputId);
-            const message = input.value.trim();
-            if (message === '') return;
-
-            appendMessage(message, 'user');
-            input.value = '';
-
-            fetch(apiRoute, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({message: message})
-            })
-            .then(response => {
-                if (!response.ok) {
-                    return response.json().then(errorData => {
-                        throw new Error(errorData.message || 'Sunucudan başarısız yanıt alındı. HTTP Durum Kodu: ' + response.status);
-                    }).catch(e => {
-                        throw new Error('Sunucudan HTTP ' + response.status + ' hatası döndü.');
-                    });
-                }
-                return response.json();
-            })
-            .then(data => {
-                if (data.success) {
-                    appendMessage(data.response, 'ai');
-                } else {
-                    appendMessage('Hata: ' + (data.message || 'Yapay Zeka Erişim Hatası oluştu. Lütfen logları kontrol edin.'), 'ai');
-                }
-            })
-            .catch(error => {
-                console.error('API İstemci Hatası:', error);
-                appendMessage('Bağlantı Hatası oluştu (İstemci Tarafı). Sunucu yanıt veremedi. Detay: ' + error.message, 'ai');
-            });
-        }
-
-        function appendMessage(text, sender) {
-            const messagesDiv = document.getElementById('messages');
-            if (!messagesDiv) return;
-
-            const msgDiv = document.createElement('div');
-            msgDiv.classList.add('message', sender + '-message');
+            .header h1 {
+                font-size: 2.5rem;
+                margin-bottom: 10px;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            }
             
-            // Markdown işleme
-            let htmlContent = text.replace(/\\n/g, '<br>');
-            // Linkler ve diğer MD kuralları
-            htmlContent = htmlContent.replace(/\\[(.*?)\\]\\((.*?)\\)/g, '<a href="$2" target="_blank">$1</a>');
-            htmlContent = htmlContent.replace(/```(.*?)\\n([\\s\\S]*?)```/g, '<pre>$2</pre>');
-            htmlContent = htmlContent.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
+            .header p {
+                font-size: 1rem;
+                opacity: 0.9;
+            }
             
-            msgDiv.innerHTML = htmlContent;
-            messagesDiv.appendChild(msgDiv);
-            // Scroll'u aşağı kaydır
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        }
-
-        document.addEventListener('DOMContentLoaded', () => {
-            const pathname = window.location.pathname;
-            const isAnimePage = pathname === '/anime';
-            const isMainChat = pathname === '/';
+            .main-content {
+                padding: 30px;
+            }
             
-            let inputId = null;
-            let historyRoute = null;
-
-            if (isAnimePage) {
-                inputId = 'anime-message-input';
-                historyRoute = '{{ url_for("api_anime_history") }}';
-            } else if (isMainChat) {
-                inputId = 'message-input';
-                historyRoute = '{{ url_for("api_history") }}';
+            .auth-section {
+                max-width: 400px;
+                margin: 0 auto;
+            }
+            
+            .form-group {
+                margin-bottom: 20px;
+            }
+            
+            .form-group label {
+                display: block;
+                margin-bottom: 8px;
+                color: #333;
+                font-weight: 600;
+            }
+            
+            .form-group input {
+                width: 100%;
+                padding: 12px;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                font-size: 1rem;
+                transition: border-color 0.3s;
+            }
+            
+            .form-group input:focus {
+                outline: none;
+                border-color: #667eea;
+            }
+            
+            .btn {
+                width: 100%;
+                padding: 14px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 1.1rem;
+                font-weight: 600;
+                cursor: pointer;
+                transition: transform 0.2s;
+            }
+            
+            .btn:hover {
+                transform: translateY(-2px);
+            }
+            
+            .btn-secondary {
+                background: #6c757d;
+                margin-top: 10px;
+            }
+            
+            .chat-section {
+                display: none;
+            }
+            
+            .chat-section.active {
+                display: block;
+            }
+            
+            .user-info {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            
+            .chat-box {
+                background: #f8f9fa;
+                border-radius: 12px;
+                padding: 20px;
+                height: 400px;
+                overflow-y: auto;
+                margin-bottom: 20px;
+            }
+            
+            .message {
+                margin-bottom: 15px;
+                padding: 12px;
+                border-radius: 8px;
+            }
+            
+            .message.user {
+                background: #667eea;
+                color: white;
+                margin-left: 20%;
+            }
+            
+            .message.ai {
+                background: white;
+                border: 2px solid #e0e0e0;
+                margin-right: 20%;
+            }
+            
+            .chat-input {
+                display: flex;
+                gap: 10px;
+            }
+            
+            .chat-input input {
+                flex: 1;
+                padding: 12px;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                font-size: 1rem;
+            }
+            
+            .mode-selector {
+                display: flex;
+                gap: 10px;
+                margin-bottom: 15px;
+            }
+            
+            .mode-btn {
+                flex: 1;
+                padding: 10px;
+                background: white;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                cursor: pointer;
+                transition: all 0.3s;
+            }
+            
+            .mode-btn.active {
+                background: #667eea;
+                color: white;
+                border-color: #667eea;
+            }
+            
+            .tabs {
+                display: flex;
+                gap: 10px;
+                margin-bottom: 20px;
+                border-bottom: 2px solid #e0e0e0;
+            }
+            
+            .tab {
+                padding: 12px 24px;
+                background: none;
+                border: none;
+                cursor: pointer;
+                font-size: 1rem;
+                color: #6c757d;
+                border-bottom: 3px solid transparent;
+                transition: all 0.3s;
+            }
+            
+            .tab.active {
+                color: #667eea;
+                border-bottom-color: #667eea;
+            }
+            
+            .tab-content {
+                display: none;
+            }
+            
+            .tab-content.active {
+                display: block;
+            }
+            
+            .admin-panel {
+                background: #f8f9fa;
+                padding: 20px;
+                border-radius: 12px;
+            }
+            
+            .bot-card {
+                background: white;
+                padding: 15px;
+                border-radius: 8px;
+                margin-bottom: 15px;
+                border-left: 4px solid #667eea;
+            }
+            
+            .status-online {
+                color: #28a745;
+                font-weight: 600;
+            }
+            
+            .status-offline {
+                color: #dc3545;
+                font-weight: 600;
+            }
+            
+            .anime-player {
+                background: black;
+                border-radius: 12px;
+                padding: 20px;
+                text-align: center;
+                min-height: 300px;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+            }
+            
+            .anime-player video,
+            .anime-player audio {
+                max-width: 100%;
+                margin-top: 20px;
             }
 
-            if (inputId) {
-                const input = document.getElementById(inputId);
-                if (input) {
-                    input.addEventListener('keypress', function(e) {
-                        if (e.key === 'Enter') {
-                            sendMessage(isAnimePage);
-                        }
-                    });
-                }
+            .bot-screen-img {
+                max-width: 100%;
+                height: auto;
+                margin-top: 10px;
+                border-radius: 5px;
+                border: 1px solid #ddd;
             }
-
-            if (historyRoute) {
-                fetch(historyRoute).then(res => res.json()).then(history => {
-                    history.forEach(msg => {
-                        appendMessage(msg.content, msg.role); 
-                    });
-                }).catch(err => console.error("Geçmiş yüklenemedi:", err));
-            }
-        });
-    </script>
-</body>
-</html>
-"""
-
-ANIME_CHAT_TEMPLATE = HTML_TEMPLATE.replace('Aurion - Gelişmiş Yapay Zeka', 'Aurion - Anime Sohbeti').replace(
-    'placeholder="Aurion\'a bir şey sor veya komut gir (/search [sorgu], /mode, /clear)"', 
-    'placeholder="Anime Aurion\'a bir anime/manga sorusu sor."'
-).replace('id="message-input"', 'id="anime-message-input"')
-
-LOGIN_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="tr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aurion - Giriş</title>
-    <style>
-        :root { --bg-dark: #121212; --text-dark: #E0E0E0; --primary-color: #007BFF; }
-        body, html { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; height: 100vh; display: flex; align-items: center; justify-content: center; background-color: var(--bg-dark); color: var(--text-dark); }
-        .container { max-width: 400px; padding: 40px; background: #1f1f1f; border-radius: 10px; box-shadow: 0 0 15px rgba(0, 123, 255, 0.2); }
-        input[type=text], input[type=password] { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #333; border-radius: 6px; box-sizing: border-box; background: #2a2a2a; color: white; font-size: 16px; }
-        button { background-color: #007BFF; color: white; padding: 14px 20px; margin: 15px 0; border: none; border-radius: 6px; cursor: pointer; width: 100%; font-size: 16px; transition: background-color 0.3s; }
-        button:hover { background-color: #0056b3; }
-        a { color: #007BFF; text-decoration: none; }
-    </style>
-</head>
-<body class="dark">
-    <div class="container">
-        <h2 style="text-align:center; color:#007BFF; margin-top: 0;">AURION Giriş</h2>
-        {% if error %}<p style="color:#dc3545; text-align:center;">{{ error }}</p>{% endif %}
-        {% if success %}<p style="color:#28a745; text-align:center;">{{ success }}</p>{% endif %}
-        <form method="POST">
-            <label for="username" style="display:block; margin-bottom: 5px;">Kullanıcı Adı</label>
-            <input type="text" id="username" name="username" required>
-            <label for="password" style="display:block; margin-bottom: 5px;">Şifre</label>
-            <input type="password" id="password" name="password" required>
-            <button type="submit">Giriş Yap</button>
-        </form>
-        <p style="text-align:center; margin-top: 20px;"><a href="{{ url_for('register') }}">Hesabınız yok mu? Kayıt olun.</a></p>
-    </div>
-</body>
-</html>
-"""
-
-REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace("AURION Giriş", "AURION Kayıt").replace("Giriş Yap", "Kayıt Ol").replace("url_for('register')", "url_for('login')").replace("Hesabınız yok mu? Kayıt olun.", "Zaten hesabınız var mı? Giriş yapın.")
-
-
-ADMIN_PANEL_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="tr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aurion - Admin Paneli</title>
-    <style>
-        :root { --bg-dark: #121212; --text-dark: #E0E0E0; --primary-color: #007BFF; --sidebar-width: 200px; --admin-color: #FFA500; --super-admin-color: #FFD700; }
-        body, html { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; height: 100vh; overflow: hidden; }
-        body.dark { background-color: var(--bg-dark); color: var(--text-dark); }
-        .sidebar { width: var(--sidebar-width); padding: 20px; background: #1f1f1f; color: var(--text-dark); box-shadow: 2px 0 5px rgba(0,0,0,0.3); display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto; }
-        .content-container { flex-grow: 1; padding: 20px; overflow-y: auto; }
-        h1.logo { color: var(--primary-color); }
-        .super-admin-link { color: var(--super-admin-color) !important; }
-        .admin-link { color: var(--admin-color) !important; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; } th, td { padding: 10px; border: 1px solid #333; text-align: left; } th { background: #333; color: white; }
-        .ban-btn { background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 5px; cursor: pointer; }
-        .log-entry { font-size: 0.9em; padding: 5px 0; border-bottom: 1px solid #222; }
-    </style>
-</head>
-<body class="dark">
-    <div class="sidebar">
-        <h1 class="logo">Aurion</h1>
-        <hr style="border-color:#333;">
-        
-        <p>Hoş Geldiniz, <b>{{ user.username }}</b></p>
-        <p>Rol: <i>{{ user.role }}</i></p>
-        <a href="{{ url_for('logout') }}" style="color:var(--primary-color);">Çıkış Yap</a>
-        
-        <hr style="border-color:#333;">
-
-        <nav style="flex-grow:1;">
-            <a href="{{ url_for('index') }}" style="display:block; margin-bottom:10px; color:inherit; text-decoration:none;">💬 Sohbet</a>
-            <a href="{{ url_for('admin_panel') }}" class="admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">🛡️ Admin Paneli</a>
-            {% if user.role == "super_admin" %}
-            <a href="{{ url_for('anime_chat_page') }}" class="super-admin-link" style="display:block; margin-bottom:10px; text-decoration:none;">📺 Anime Sohbeti</a>
-            {% endif %}
-        </nav>
-    </div>
-
-    <div class="content-container">
-        <h2 style="color:var(--admin-color);">🛡️ Admin Paneli</h2>
-
-        <div style="margin-bottom: 30px;">
-            <h3>Kullanıcı Yönetimi</h3>
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>⚡ AURION PROJECT</h1>
+                <p>v17.0 - AI Powered Anime & Minecraft Bot Control Center</p>
+            </div>
             
-            <table>
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Kullanıcı Adı</th>
-                        <th>Rol</th>
-                        <th>Durum</th>
-                        <th>Eylem</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for u in users %}
-                    <tr>
-                        <td>{{ u.id }}</td>
-                        <td>{{ u.username }}</td>
-                        <td style="color:{% if u.role == 'super_admin' %}var(--super-admin-color){% elif u.role == 'admin' %}var(--admin-color){% else %}inherit{% endif %};">
-                            {{ u.role }}
-                        </td>
-                        <td style="color:{% if u.is_banned %}red{% else %}green{% endif %};">
-                            {% if u.is_banned %}Yasaklı{% else %}Aktif{% endif %}
-                        </td>
-                        <td>
-                            {% if u.role != 'super_admin' and u.id != user.id %}
-                                {% if not u.is_banned %}
-                                <form method="POST" action="{{ url_for('admin_ban_user', user_id=u.id) }}" style="display:inline;">
-                                    <button type="submit" class="ban-btn">Yasakla</button>
-                                </form>
-                                {% else %}
-                                <form method="POST" action="#" style="display:inline;"> 
-                                    <button type="submit" class="ban-btn" disabled style="background:#555;">Yasak Kaldır</button> 
-                                </form>
-                                {% endif %}
-                            {% else %}
-                                -
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-
-        <div>
-            <h3>Yönetici Kayıtları (Son 50)</h3>
-            {% for log in logs %}
-                <div class="log-entry" style="color:{% if 'Yasaklama' in log.action %}#dc3545{% else %}#007BFF{% endif %};">
-                    [{{ log.timestamp }}] **{{ log.action }}** işlemi, {{ log.target_username }} kullanıcısını hedef aldı.
+            <div class="main-content">
+                <div id="authSection" class="auth-section">
+                    <div class="form-group">
+                        <label>Kullanıcı Adı</label>
+                        <input type="text" id="username" placeholder="Kullanıcı adınız">
+                    </div>
+                    <div class="form-group">
+                        <label>Şifre</label>
+                        <input type="password" id="password" placeholder="Şifreniz">
+                    </div>
+                    <button class="btn" onclick="login()">Giriş Yap</button>
+                    <button class="btn btn-secondary" onclick="register()">Kayıt Ol</button>
                 </div>
-            {% endfor %}
+                
+                <div id="chatSection" class="chat-section">
+                    <div class="user-info">
+                        <div>
+                            <strong id="currentUsername"></strong>
+                            <span id="currentRole"></span>
+                        </div>
+                        <button class="btn" style="width: auto; padding: 8px 16px;" onclick="logout()">Çıkış</button>
+                    </div>
+                    
+                    <div class="tabs">
+                        <button class="tab active" onclick="switchTab('chat')">💬 Sohbet</button>
+                        <button class="tab" id="adminTab" onclick="switchTab('admin')" style="display: none;">👑 Admin Paneli</button>
+                        <button class="tab" id="animeTab" onclick="switchTab('anime')" style="display: none;">🎬 Anime Dublaj</button>
+                        <button class="tab" id="minecraftTab" onclick="switchTab('minecraft')" style="display: none;">⛏️ Minecraft Bots</button>
+                    </div>
+                    
+                    <div id="chatTab" class="tab-content active">
+                        <div class="mode-selector">
+                            <button class="mode-btn active" data-mode="arkadaş" onclick="selectMode('arkadaş')">😊 Arkadaş</button>
+                            <button class="mode-btn" data-mode="düşman" onclick="selectMode('düşman')">😈 Düşman</button>
+                            <button class="mode-btn" data-mode="öğretmen" onclick="selectMode('öğretmen')">👨‍🏫 Öğretmen</button>
+                        </div>
+                        
+                        <div class="chat-box" id="chatBox"></div>
+                        
+                        <div class="chat-input">
+                            <input type="text" id="messageInput" placeholder="Mesajınızı yazın..." onkeypress="if(event.key==='Enter') sendMessage()">
+                            <button class="btn" style="width: auto; padding: 12px 24px;" onclick="sendMessage()">Gönder</button>
+                        </div>
+                    </div>
+                    
+                    <div id="adminTab" class="tab-content">
+                        <div class="admin-panel">
+                            <h2>Kullanıcı Yönetimi</h2>
+                            <div id="usersList"></div>
+                            
+                            <h2 style="margin-top: 30px;">Yasaklanan Kullanıcılar</h2>
+                            <div id="bansList"></div>
+                        </div>
+                    </div>
+                    
+                    <div id="animeTab" class="tab-content">
+                        <h2>🎬 Anime Dublaj Oluştur</h2>
+                        <div class="form-group">
+                            <label>Anime İstemi</label>
+                            <input type="text" id="animePrompt" placeholder="Örn: Bir ninja karakteri köyde dolaşıyor ve arkadaşlarıyla konuşuyor">
+                        </div>
+                        <div class="form-group">
+                            <label>Karakter Adı</label>
+                            <input type="text" id="animeCharacter" placeholder="Örn: Naruto" value="Anime Karakteri">
+                        </div>
+                        <button class="btn" onclick="generateAnime()">Anime Oluştur</button>
+                        
+                        <div id="animePlayer" class="anime-player" style="margin-top: 20px; display: none;">
+                            <h3 style="color: white;">Anime Oynatıcı</h3>
+                            <p id="animeScript" style="color: white; margin-top: 20px;"></p>
+                            <audio id="animeAudio" controls></audio>
+                            <video id="animeVideo" controls style="display: none;"></video>
+                        </div>
+                        
+                        <div id="animeHistory" style="margin-top: 30px;"></div>
+                    </div>
+                    
+                    <div id="minecraftTab" class="tab-content">
+                        <h2>⛏️ Minecraft Bot Yönetim Merkezi</h2>
+                        
+                        <div class="form-group">
+                            <label>Bot Adı</label>
+                            <input type="text" id="botName" placeholder="Bot adı">
+                        </div>
+                        <div class="form-group">
+                            <label>Sunucu IP</label>
+                            <input type="text" id="serverIp" placeholder="localhost">
+                        </div>
+                        <div class="form-group">
+                            <label>Port</label>
+                            <input type="number" id="serverPort" placeholder="25565" value="25565">
+                        </div>
+                        <button class="btn" onclick="createBot()">Bot Oluştur</button>
+                        
+                        <h3 style="margin-top: 30px;">Mevcut Botlar</h3>
+                        <div id="botsList"></div>
+                    </div>
+                </div>
+            </div>
         </div>
-    </div>
-</body>
-</html>
-"""
+        
+        <script>
+            let token = null;
+            let currentUser = null;
+            let currentMode = 'arkadaş';
+            
+            // Auth Functions
+            async function login() {
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                
+                try {
+                    const response = await fetch('/api/login', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({username, password})
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        token = data.token;
+                        currentUser = data.user;
+                        showChatSection();
+                    } else {
+                        alert('Giriş başarısız: ' + data.detail);
+                    }
+                } catch (error) {
+                    alert('Hata: ' + error.message);
+                }
+            }
+            
+            async function register() {
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                
+                try {
+                    const response = await fetch('/api/register', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({username, password})
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        token = data.token;
+                        currentUser = data.user;
+                        showChatSection();
+                    } else {
+                        alert('Kayıt başarısız: ' + data.detail);
+                    }
+                } catch (error) {
+                    alert('Hata: ' + error.message);
+                }
+            }
+            
+            function logout() {
+                token = null;
+                currentUser = null;
+                document.getElementById('authSection').style.display = 'block';
+                document.getElementById('chatSection').classList.remove('active');
+            }
+            
+            function showChatSection() {
+                document.getElementById('authSection').style.display = 'none';
+                document.getElementById('chatSection').classList.add('active');
+                document.getElementById('currentUsername').textContent = currentUser.username;
+                document.getElementById('currentRole').textContent = `(${currentUser.role})`;
+                
+                // Show admin tabs if admin or super_admin
+                if (currentUser.role === 'admin' || currentUser.role === 'super_admin') {
+                    document.getElementById('adminTab').style.display = 'block';
+                }
+                
+                // Show super admin tabs
+                if (currentUser.role === 'super_admin') {
+                    document.getElementById('animeTab').style.display = 'block';
+                    document.getElementById('minecraftTab').style.display = 'block';
+                }
+                
+                loadChatHistory();
+            }
+            
+            // Chat Functions
+            function selectMode(mode) {
+                currentMode = mode;
+                document.querySelectorAll('.mode-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                    if (btn.dataset.mode === mode) {
+                        btn.classList.add('active');
+                    }
+                });
+            }
+            
+            async function sendMessage() {
+                const input = document.getElementById('messageInput');
+                const message = input.value.trim();
+                
+                if (!message) return;
+                
+                // Add user message to chat
+                addMessageToChat(message, 'user');
+                input.value = '';
+                
+                try {
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({message, mode: currentMode})
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        addMessageToChat(data.response, 'ai');
+                    } else {
+                        addMessageToChat('Hata: ' + data.detail, 'ai');
+                    }
+                } catch (error) {
+                    addMessageToChat('Hata: ' + error.message, 'ai');
+                }
+            }
+            
+            function addMessageToChat(message, type) {
+                const chatBox = document.getElementById('chatBox');
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${type}`;
+                messageDiv.textContent = message;
+                chatBox.appendChild(messageDiv);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+            
+            async function loadChatHistory() {
+                try {
+                    const response = await fetch('/api/chat/history', {
+                        headers: {'Authorization': `Bearer ${token}`}
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        const chatBox = document.getElementById('chatBox');
+                        chatBox.innerHTML = '';
+                        data.history.forEach(chat => {
+                            addMessageToChat(chat.message, 'user');
+                            addMessageToChat(chat.response, 'ai');
+                        });
+                    }
+                } catch (error) {
+                    console.error('Error loading chat history:', error);
+                }
+            }
+            
+            // Tab Functions
+            function switchTab(tabName) {
+                document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+                
+                event.target.classList.add('active');
+                document.getElementById(`${tabName}Tab`).classList.add('active');
+                
+                // Load data for specific tabs
+                if (tabName === 'admin') loadAdminData();
+                if (tabName === 'minecraft') loadBots();
+                if (tabName === 'anime') loadAnimeHistory();
+            }
+            
+            // Admin Functions
+            async function loadAdminData() {
+                try {
+                    const [usersRes, bansRes] = await Promise.all([
+                        fetch('/api/admin/users', {headers: {'Authorization': `Bearer ${token}`}}),
+                        fetch('/api/admin/bans', {headers: {'Authorization': `Bearer ${token}`}})
+                    ]);
+                    
+                    const usersData = await usersRes.json();
+                    const bansData = await bansRes.json();
+                    
+                    const usersList = document.getElementById('usersList');
+                    usersList.innerHTML = usersData.users.map(user => `
+                        <div class="bot-card">
+                            <strong>${user.username}</strong> (${user.role})<br>
+                            <small>Kayıt: ${new Date(user.created_at).toLocaleString('tr-TR')}</small>
+                        </div>
+                    `).join('');
+                    
+                    const bansList = document.getElementById('bansList');
+                    bansList.innerHTML = bansData.bans.filter(b => b.active).map(ban => `
+                        <div class="bot-card">
+                            <strong>${ban.username}</strong><br>
+                            Sebep: ${ban.reason}<br>
+                            Yasaklayan: ${ban.banned_by}<br>
+                            <small>${new Date(ban.timestamp).toLocaleString('tr-TR')}</small>
+                        </div>
+                    `).join('') || '<p>Yasaklı kullanıcı yok</p>';
+                } catch (error) {
+                    console.error('Error loading admin data:', error);
+                }
+            }
+            
+            // Anime Functions
+            async function generateAnime() {
+                const prompt = document.getElementById('animePrompt').value;
+                const character = document.getElementById('animeCharacter').value;
+                
+                if (!prompt) {
+                    alert('Lütfen bir anime istemi girin');
+                    return;
+                }
+                
+                try {
+                    const response = await fetch('/api/anime/generate', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({prompt, character})
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        alert(data.message);
+                        loadAnimeHistory(); // Yeni görevi görmek için geçmişi yükle
+                    } else {
+                        alert('Hata: ' + data.detail);
+                    }
+                } catch (error) {
+                    alert('Hata: ' + error.message);
+                }
+            }
 
-# ==============================================================================
-# 6. UYGULAMA BAŞLATMA
-# ==============================================================================
+            async function loadAnimeHistory() {
+                try {
+                    const response = await fetch('/api/anime/videos', {
+                        headers: {'Authorization': `Bearer ${token}`}
+                    });
+                    
+                    const data = await response.json();
+                    const historyDiv = document.getElementById('animeHistory');
+                    historyDiv.innerHTML = '<h3>Geçmiş Videolar:</h3>'
+                    
+                    if (response.ok && data.videos.length > 0) {
+                        data.videos.forEach(video => {
+                            const card = document.createElement('div');
+                            card.className = 'bot-card';
+                            
+                            let statusText;
+                            let mediaContent = '';
+                            
+                            if (video.status === 'video_completed') {
+                                statusText = '✅ TAMAMLANDI';
+                                mediaContent = `
+                                    <audio controls src="${video.audio_url}" style="margin-top: 10px;"></audio>
+                                    <video controls src="${video.video_url}" style="margin-top: 10px; max-width: 100%; height: auto;"></video>
+                                `;
+                            } else if (video.status === 'video_pending' || video.status === 'producing') {
+                                statusText = `⏳ ${video.status.toUpperCase()}`;
+                                mediaContent = `<p style="color: orange;">Video üretimi devam ediyor. Lütfen bekleyin...</p>`;
+                            } else {
+                                statusText = '❌ SES HATASI';
+                            }
+                            
+                            card.innerHTML = `
+                                <strong>${video.character} (Status: ${statusText})</strong><br>
+                                İstem: ${video.prompt}<br>
+                                Script: <small>${video.script.substring(0, 100)}...</small><br>
+                                ${mediaContent}
+                                <small>Oluşturma: ${new Date(video.created_at).toLocaleString('tr-TR')}</small>
+                            `;
+                            historyDiv.appendChild(card);
+                        });
+                    } else {
+                        historyDiv.innerHTML += '<p>Henüz oluşturulmuş video yok.</p>';
+                    }
+                } catch (error) {
+                    console.error('Error loading anime history:', error);
+                }
+            }
+            
+            // Minecraft Functions
+            async function createBot() {
+                const botName = document.getElementById('botName').value;
+                const serverIp = document.getElementById('serverIp').value;
+                const serverPort = document.getElementById('serverPort').value;
+                
+                if (!botName || !serverIp) {
+                    alert('Bot adı ve sunucu IP gerekli');
+                    return;
+                }
+                
+                try {
+                    const response = await fetch('/api/minecraft/bot/create', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({
+                            bot_name: botName,
+                            server_ip: serverIp,
+                            server_port: parseInt(serverPort)
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        alert(data.message);
+                        loadBots();
+                    } else {
+                        alert('Hata: ' + data.detail);
+                    }
+                } catch (error) {
+                    alert('Hata: ' + error.message);
+                }
+            }
+            
+            async function loadBots() {
+                try {
+                    const response = await fetch('/api/minecraft/bots', {
+                        headers: {'Authorization': `Bearer ${token}`}
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        const botsList = document.getElementById('botsList');
+                        botsList.innerHTML = data.bots.map(bot => {
+                            const statusClass = bot.status === 'online' ? 'status-online' : 'status-offline';
+                            const statusText = bot.status === 'online' ? '🟢 Online' : '🔴 Offline';
+                            const commandInputId = `cmd_${bot.id}`;
+                            
+                            // Rastgele bir ekran görüntüsü URL'si oluşturma (Simülasyon)
+                            const screenUrl = bot.screen_url || '/static/img/default_screen.jpg';
+                            const currentTask = bot.current_task || 'Rölanti';
 
-if __name__ == '__main__':
-    try:
-        app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000)) 
-    except Exception as e:
-        print(f"!!! [AURION INIT ERROR] Uygulama başlatılamadı: {str(e)}", file=sys.stderr)
+                            return `
+                                <div class="bot-card">
+                                    <strong>${bot.bot_name}</strong>
+                                    <span class="${statusClass}">${statusText}</span><br>
+                                    Sunucu: ${bot.server_ip}:${bot.server_port}<br>
+                                    Mevcut Görev: ${currentTask}<br>
+                                    <img src="${screenUrl}" class="bot-screen-img" alt="Bot Ekran Görüntüsü (Simüle)">
+                                    <input type="text" id="${commandInputId}" placeholder="Komut gir (Örn: mine 5, build house)" style="margin-top: 10px; width: 70%;">
+                                    <button class="btn" style="width: 28%; padding: 8px;" onclick="sendBotCommand('${bot.id}')">Gönder</button>
+                                </div>
+                            `;
+                        }).join('') || '<p>Henüz bot yok</p>';
+
+                        // Botlar listelendikten sonra 5 saniyede bir güncel yüklemek için ayarla
+                        setTimeout(loadBots, 5000); 
+                    }
+                } catch (error) {
+                    console.error('Error loading bots:', error);
+                    // Hata durumunda bile 5 saniye sonra tekrar denemek
+                    setTimeout(loadBots, 5000);
+                }
+            }
+            
+            async function sendBotCommand(botId) {
+                const command = document.getElementById(`cmd_${botId}`).value;
+                
+                if (!command) {
+                    alert('Komut girin');
+                    return;
+                }
+                
+                try {
+                    const response = await fetch('/api/minecraft/bot/command', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({bot_id: botId, command})
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        alert(data.message);
+                        document.getElementById(`cmd_${botId}`).value = '';
+                        loadBots(); // Komut gönderildikten hemen sonra listeyi güncelle
+                    } else {
+                        alert('Hata: ' + data.detail);
+                    }
+                } catch (error) {
+                    alert('Hata: ' + error.message);
+                }
+            }
+        </script>
+    </body>
+    </html>
+    """
+    return html
+
+# Static files (for audio and simulated images/videos)
+Path("static/audio").mkdir(parents=True, exist_ok=True)
+Path("static/img").mkdir(parents=True, exist_ok=True)
+Path("static/videos").mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Ana Worker Loop'u Başlatmak İçin
+@app.on_event("startup")
+async def start_workers():
+    # Worker'ları başlat
+    asyncio.create_task(minecraft_worker_logic())
+    asyncio.create_task(anime_producer_logic())
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Worker'ları başlatmak için uvicorn'u asyncio loop'u içinde çalıştırın
+    print("🚀 AURION Project v17.0 başlatılıyor...")
+    print("🔐 Super Admin: enes / enes13579")
+    print("📡 Server: http://localhost:8000")
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
