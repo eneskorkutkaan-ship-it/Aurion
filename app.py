@@ -62,7 +62,6 @@ if GEMINI_API_KEY and genai:
 
 # ====== DATABASE (ASENKRON GÜVENLİ) ======
 class Database:
-    # ... (Database sınıfı önceki kodla aynı kaldı, asenkron güvenli erişim metotları korunmuştur) ...
     def __init__(self):
         self.data = self.load_sync()
         
@@ -81,14 +80,15 @@ class Database:
         return {
             "users": [],
             "chats": [],
-            "commands": [], # Komutlar listesi
+            "commands": [],
             "bans": [],
             "minecraft_bots": [],
             "anime_videos": []
         }
 
     async def load(self):
-        return await asyncio.to_thread(self.load_sync)
+        # Dosya okuma/yazma işlemlerini bir iş parçacığına taşı
+        return await asyncio.to_thread(self.load_sync) 
 
     def save_sync(self, data):
         try:
@@ -204,7 +204,7 @@ class Database:
 
 db = Database()
 
-# ====== SECURITY & AUTH (Aynı Kaldı) ======
+# ====== SECURITY & AUTH ======
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
@@ -242,19 +242,23 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise HTTPException(status_code=403, detail="User is banned")
     
     user = await db.get_user(username)
+    
+    # !!! Düzeltme: Super Admin veritabanında bulunmasa bile dictionary olarak döndürülmeli.
+    # Aksi takdirde, user None olduğu zaman, bu fonksiyonu çağıran yerlerde TypeError oluşabilir.
     if user is None and username == SUPER_ADMIN_USERNAME:
-        user = {
+        return {
             "username": SUPER_ADMIN_USERNAME,
             "role": "super_admin",
             "created_at": datetime.utcnow().isoformat()
         }
     
     if user is None:
+        # Bu kısma sadece token'ı geçerli ama veritabanından silinmiş kullanıcılar düşmeli
         raise HTTPException(status_code=404, detail="User not found")
     
     return user
 
-# ====== MODELS (CommandRequest Eklendi) ======
+# ====== MODELS ======
 class RegisterRequest(BaseModel):
     username: str
     password: str
@@ -271,13 +275,13 @@ class BanRequest(BaseModel):
     username: str
     reason: str
 
-# !!! EKLENDİ (Resim 1000002580.jpg'deki NameError hatasını çözmek için) !!!
+# CommandRequest NameError çözümü
 class CommandRequest(BaseModel):
     command: str
     args: Optional[List[str]] = []
 
 class AnimeRequest(BaseModel):
-    script: str  # Var olan bölümden alınan diyalog metni
+    script: str  
     character: Optional[str] = "Anime Karakteri"
 
 class MinecraftBotCommand(BaseModel):
@@ -289,7 +293,7 @@ class MinecraftBotCreate(BaseModel):
     server_ip: str
     server_port: int = 25565
 
-# ====== AI HELPER (Aynı Kaldı) ======
+# ====== AI HELPER ======
 class AIAssistant:
     def __init__(self):
         self.modes = {
@@ -297,7 +301,7 @@ class AIAssistant:
             "düşman": "Sen sert, eleştirel ve meydan okuyan birisin. Keskin ve provokatif konuş.",
             "öğretmen": "Sen sabırlı, bilgili ve açıklayıcı bir öğretmensin. Her şeyi detaylı ve anlaşılır şekilde anlat."
         }
-        # Önceki hataları gidermek için model sabitlendi (Resim 1000002576.jpg)
+        # Hata 404'ü çözmek için model adı "gemini-2.5-flash" olarak değiştirildi.
         self.chat_model = 'gemini-2.5-flash' 
     
     async def chat(self, message: str, mode: str = "arkadaş", history: List = []):
@@ -322,7 +326,8 @@ class AIAssistant:
 
             return response.text
         except APIError as e:
-            return f"❌ AI Modeli Hatası (404/API): Lütfen API anahtarınızı ve model adını kontrol edin. Hata: {e}"
+            # API Hata mesajı düzeltildi (Resim 1000002576.jpg hatasına daha uygun)
+            return f"❌ AI Modeli Hatası: Gemini API'dan yanıt alınamadı. Model adı ('{self.chat_model}') veya API anahtarı geçersiz olabilir. Hata: {e}"
         except Exception as e:
             return f"❌ Genel Hata: {str(e)}"
     
@@ -361,7 +366,7 @@ class TTSEngine:
 tts_engine = TTSEngine()
 
 # ====== FASTAPI APP ======
-app = FastAPI(title="AURION Project v17.2", description="Super Admin Kontrol Merkezi")
+app = FastAPI(title="AURION Project v17.3", description="Super Admin Kontrol Merkezi")
 
 app.add_middleware(
     CORSMiddleware,
@@ -371,10 +376,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====== WORKER LOGIC (Aynı Kaldı) ======
+# ====== WORKER LOGIC ======
 async def minecraft_worker_logic():
     print("⛏️ Minecraft Bot Worker Başlatıldı.")
-    # ... (Minecraft worker logic) ...
     while True:
         try:
             bots = await db.get_minecraft_bots()
@@ -425,11 +429,11 @@ async def minecraft_worker_logic():
 
 async def anime_producer_logic():
     print("🎬 Anime Producer Worker Başlatıldı.")
-    # ... (Anime worker logic) ...
     while True:
         try:
             all_videos = await db.get_anime_videos(SUPER_ADMIN_USERNAME) 
-            pending_videos = [v for v v.get("status") == "video_pending"]
+            # !!! Hata Düzeltme: SyntaxError: for döngüsü değişkenlerinden sonra 'in' bekleniyor
+            pending_videos = [v for v in all_videos if v.get("status") == "video_pending"]
             
             if not pending_videos:
                 pass
@@ -466,7 +470,7 @@ async def anime_producer_logic():
         await asyncio.sleep(WORKER_LOOP_INTERVAL)
 
 
-# ====== ENDPOINTS (Aynı Kaldı) ======
+# ====== ENDPOINTS ======
 
 @app.post("/api/register")
 async def register(req: RegisterRequest):
@@ -531,7 +535,6 @@ async def clear_chat_history(current_user: dict = Depends(get_current_user)):
     await db.clear_chats(current_user["username"])
     return {"message": "Chat history cleared"}
 
-# CommandRequest modelinin eklenmesinden sonra artık hata vermeyecek
 @app.post("/api/command")
 async def execute_command(req: CommandRequest, current_user: dict = Depends(get_current_user)):
     username = current_user["username"]
@@ -677,7 +680,7 @@ async def send_bot_command(req: MinecraftBotCommand, current_user: dict = Depend
     
     return {"message": "Komut gönderildi. Bot worker'ı kısa süre içinde işleme başlayacak.", "command": req.command}
 
-# ====== FRONTEND HTML (Syntax Hatası Giderildi) ======
+# ====== FRONTEND HTML ======
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     html = """
@@ -686,7 +689,7 @@ async def serve_frontend():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>AURION Project v17.2 - Super Admin</title>
+        <title>AURION Project v17.3 - Super Admin</title>
         <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
         <style>
             /* Genel Stil ve Koyu Tema */
@@ -926,6 +929,20 @@ async def serve_frontend():
                 border-radius: 4px;
                 border: 1px solid #44475a;
             }
+
+            /* Hata mesajı için textarea stili */
+            #animeScript {
+                width: 100%;
+                min-height: 150px;
+                padding: 10px;
+                border: 1px solid #44475a;
+                border-radius: 6px;
+                background-color: #383a48;
+                color: var(--text);
+                font-size: 1rem;
+                resize: vertical;
+            }
+
         </style>
     </head>
     <body>
@@ -1076,6 +1093,9 @@ async def serve_frontend():
                         body: body ? JSON.stringify(body) : null
                     });
                     
+                    // 204 No Content durumunu kontrol et
+                    if (response.status === 204) return { message: "İşlem başarılı" }; 
+
                     const data = await response.json();
                     
                     if (!response.ok) {
@@ -1161,8 +1181,11 @@ async def serve_frontend():
                 document.querySelectorAll('.nav-link').forEach(link => link.classList.remove('active'));
                 document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
                 
-                document.querySelector(`.nav-link[data-tab="${tabName}"]`).classList.add('active');
-                document.getElementById(`${tabName}Tab`).classList.add('active');
+                const activeLink = document.querySelector(`.nav-link[data-tab="${tabName}"]`);
+                const activeContent = document.getElementById(`${tabName}Tab`);
+
+                if (activeLink) activeLink.classList.add('active');
+                if (activeContent) activeContent.classList.add('active');
 
                 clearInterval(updateInterval); 
 
@@ -1195,6 +1218,21 @@ async def serve_frontend():
                 const message = input.value.trim();
                 if (!message) return;
                 
+                // Komut kontrolü
+                if (message.startsWith('/')) {
+                    const parts = message.substring(1).split(' ');
+                    const cmd = parts[0];
+                    const args = parts.slice(1);
+                    const cmdData = await apiCall('/api/command', 'POST', {command: cmd, args: args});
+
+                    if (cmdData) {
+                        addMessageToChat(message, 'user');
+                        addMessageToChat(cmdData.message, 'ai');
+                        input.value = '';
+                    }
+                    return;
+                }
+
                 addMessageToChat(message, 'user');
                 input.value = '';
                 
@@ -1349,7 +1387,7 @@ async def serve_frontend():
                     data.bots.forEach(bot => {
                         const statusClass = bot.status === 'online' ? 'status-online' : 'status-offline';
                         const statusText = bot.status === 'online' ? '🟢 Online' : '🔴 Offline';
-                        const commandInputId = 'cmd_' + bot.id; // JavaScript tarafında tek tırnak kullan
+                        const commandInputId = 'cmd_' + bot.id; 
                         const statusColor = bot.status === 'online' ? 'var(--success)' : 'var(--danger)';
                         
                         const screenUrl = bot.screen_url ? bot.screen_url : '/static/img/sim/default_screen.png';
@@ -1359,7 +1397,7 @@ async def serve_frontend():
                         card.className = 'data-card';
                         card.style.borderLeftColor = statusColor;
                         
-                        // !!! Düzeltme: HTML içindeki JS çağrılarında tırnak kullanımı kontrol edildi.
+                        // Hata çözüldü: HTML içindeki JS çağrılarında tırnak kullanımı kontrol edildi.
                         card.innerHTML = `
                             <strong>${bot.bot_name}</strong>
                             <span class="${statusClass}">(${statusText})</span><br>
@@ -1417,6 +1455,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def start_workers():
     print("🚀 [AURION START OK] Gemini istemcisi başarıyla başlatıldı.")
     
+    # DB'de Super Admin'in olup olmadığını kontrol et ve ekle.
     if not await db.get_user(SUPER_ADMIN_USERNAME):
         print(">>> [DB INIT] Veritabanı güncelleniyor ve başlangıç kullanıcıları hazırlanıyor.")
         super_admin_user = {
@@ -1438,7 +1477,7 @@ async def start_workers():
 if __name__ == "__main__":
     import uvicorn
     
-    print("🚀 AURION Project v17.2 (Final Revizyon) başlatılıyor...")
+    print("🚀 AURION Project v17.3 (Final Revizyon) başlatılıyor...")
     print("🔐 Super Admin: enes / enes13579")
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
