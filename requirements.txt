@@ -4,5 +4,7 @@ pydantic
 passlib
 python-jose
 python-multipart
+# Python 3.10 ve üzeri için bcrypt'in doğru sürümü kritik
 bcrypt==4.1.2 
+# Gemini AI kütüphanesi
 google-genai
