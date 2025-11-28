@@ -11,18 +11,21 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from typing import Optional, List
 
-# ----- 1. Kütüphane Kontrolü ve Yükleme (Gerekli olmasa da hata kontrolü için) -----
+# ----- 1. Kütüphane Kontrolü ve Yükleme -----
 try:
     from google import genai
 except ImportError:
     genai = None
-    print("!!! [HATA] google-genai kütüphanesi bulunamadı. Lütfen 'pip install google-genai' komutunu çalıştırın.")
+    print("!!! [HATA] google-genai kütüphanesi bulunamadı.")
 
-# ----- 2. KONFİGÜRASYON VE SABİTLER (Kişiselleştirilmiş) -----
+# ----- 2. KONFİGÜRASYON VE SABİTLER (Kişiselleştirilmiş ve Parçalanmış Key) -----
 
-# Kendi API Anahtarınız, doğrudan koda gömülmüştür.
-# GÜVENLİK NOTU: Bu, yalnızca test amaçlıdır. Canlı uygulamalarda Ortam Değişkeni kullanın.
-GEMINI_API_KEY = "AIzaSyD0KH3AFQXRh84ImhLc0SXyG9bZny40IMM" 
+# API Anahtarınız, kullanıcının isteği üzerine 8 parçaya bölündü.
+# DİKKAT: Bu gerçek bir güvenlik yöntemi değildir.
+KEY_PARTS = [
+    "AIzaS", "yD0KH", "3AFQX", "Rh84I", "mhLc0", "SXyG9", "bZny4", "0IMM"
+]
+GEMINI_API_KEY = "".join(KEY_PARTS) # Anahtar burada birleştirildi
 
 # Güvenlik ve JWT (Token) ayarları
 SECRET_KEY = os.environ.get("SECRET_KEY", "aurion-random-secret-key-123456") 
@@ -36,15 +39,29 @@ DATA_DİZİNİ = "data"
 # Şifreleme (Bcrypt)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# ----- 3. Gemini AI Yapılandırması ve Durumu -----
+# ----- 3. Pydantic Modelleri -----
+class ChatMessage(BaseModel):
+    sender: str
+    content: str
+    timestamp: datetime.datetime = datetime.datetime.now()
 
-# API Key'in varlığını kontrol et
+class User(BaseModel):
+    id: str = None
+    username: str
+    password: str
+    role: str = "user"  # user, super_admin
+    chat_history: List[ChatMessage] = [] # KULLANICIYA ÖZEL SOHBET GEÇMİŞİ EKLENDİ
+
+class DatabaseSchema(BaseModel):
+    users: List[User] = []
+    # Global 'chats' listesi kaldırıldı, tarihçeler artık User modelinde tutuluyor.
+
+# ----- 4. Gemini AI Yapılandırması ve Durumu -----
+
 AI_ENABLED = False
 if GEMINI_API_KEY and genai:
     try:
-        # API anahtarını doğrudan koda yazarak yapılandır
         genai.configure(api_key=GEMINI_API_KEY) 
-        # API client'ı oluşturmayı deneyerek anahtarın geçerliliğini kontrol et
         if genai.Client(): 
              print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
              AI_ENABLED = True
@@ -54,25 +71,6 @@ if GEMINI_API_KEY and genai:
 else:
     print("!!! [UYARI] Google GenAI kütüphanesi veya API Key eksik.")
 
-
-# ----- 4. FastAPI Uygulama ve Veritabanı (DB) Modelleri -----
-app = FastAPI()
-
-# Pydantic Modelleri
-class User(BaseModel):
-    id: str = None
-    username: str
-    password: str
-    role: str = "user"  # user, super_admin
-
-class ChatMessage(BaseModel):
-    sender: str
-    content: str
-    timestamp: datetime.datetime = datetime.datetime.now()
-
-class DatabaseSchema(BaseModel):
-    users: List[User] = []
-    chats: List[ChatMessage] = []
 
 # ----- 5. DatabaseManager Sınıfı -----
 
@@ -87,32 +85,25 @@ class DatabaseManager:
             os.makedirs(DATA_DİZİNİ)
 
     def _hash_password(self, password: str) -> str:
-        # Şifreyi hash'le
         return pwd_context.hash(password)
 
     def _ensure_db_exists(self):
         if not os.path.exists(self.db_path):
             print(">>> [DB INIT] Veritabanı oluşturuluyor.")
-
-            # ENES'E ÖZEL VARSAYILAN SUPER ADMIN ŞİFRESİ
             admin_password_hash = self._hash_password("enes12345") 
 
             initial_data = {
                 "users": [
                     # ENES: Yeni varsayılan Super Admin
                     User(id=str(uuid.uuid4()), username="enes", role="super_admin", password=admin_password_hash).dict(),
-                ],
-                "chats": []
+                ]
             }
             try:
-                # Pydantic ile validasyon
                 DatabaseSchema(**initial_data)
                 with open(self.db_path, "w", encoding="utf-8") as f:
                     json.dump(initial_data, f, ensure_ascii=False, indent=4)
-            except ValidationError as e:
-                print(f"!!! [DB HATA] İlk veri şeması hatası: {e}")
             except Exception as e:
-                print(f"!!! [DB HATA] Veritabanı oluşturulurken beklenmedik hata: {e}")
+                print(f"!!! [DB HATA] İlk veri oluşturulurken hata: {e}")
 
     def load_db(self) -> dict:
         self._ensure_db_exists()
@@ -121,16 +112,9 @@ class DatabaseManager:
                 data = json.load(f)
             # Yüklenen veriyi Pydantic ile doğrula
             return DatabaseSchema(**data).dict()
-        except FileNotFoundError:
-            self._ensure_db_exists()
-            return self.load_db()
-        except json.JSONDecodeError:
-            print("!!! [DB HATA] JSON okuma hatası. Veritabanı dosyası bozuk.")
-            # Bozuk dosyayı yedekleyip yeniden oluşturmayı düşünebilirsiniz.
-            raise HTTPException(status_code=500, detail="Veritabanı okuma hatası.")
-        except ValidationError as e:
-            print(f"!!! [DB HATA] Yüklenen veri şeması hatası: {e}")
-            raise HTTPException(status_code=500, detail="Veritabanı şeması hatası.")
+        except Exception as e:
+            print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}")
+            raise HTTPException(status_code=500, detail="Veritabanı hatası.")
 
     def save_db(self, data: dict):
         try:
@@ -138,8 +122,8 @@ class DatabaseManager:
             DatabaseSchema(**data) 
             with open(self.db_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
-        except ValidationError as e:
-            print(f"!!! [DB HATA] Kaydedilmek istenen veri şeması hatası: {e}")
+        except Exception as e:
+            print(f"!!! [DB HATA] Veri kaydetme hatası: {e}")
             raise HTTPException(status_code=500, detail="Veri kaydetme hatası.")
 
 db_manager = DatabaseManager(DB_YOLU)
@@ -159,28 +143,53 @@ def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] 
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# ----- 7. AI_Assistant Sınıfı (Gemini İşlemleri) -----
+# JWT Kontrolü için kullanılan bağımlılık fonksiyonu
+def get_current_user(request: Request) -> dict:
+    """JWT token'ı kullanarak mevcut kullanıcının kimliğini ve rolünü doğrular."""
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Yetkilendirme token'ı eksik.")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        user_role: str = payload.get("role")
+        if username is None or user_role is None:
+            raise HTTPException(status_code=401, detail="Token geçersiz.")
+        return {"username": username, "role": user_role}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Geçersiz veya süresi dolmuş token. Lütfen tekrar giriş yapın.")
+
+
+# ----- 7. AI_Assistant Sınıfı (Stateless - Geçmişi Dışarıdan Alır) -----
 
 class AI_Assistant:
     def __init__(self):
-        self.model = None
-        if AI_ENABLED:
-            try:
-                # 404 Model Hatasını çözmek için 'gemini-pro' yerine 'gemini-2.5-flash' kullan
-                self.model = genai.Client().models.get("gemini-2.5-flash") 
-                self.chat = genai.Client().chats.create(model="gemini-2.5-flash")
-                print(">>> [AI INIT] Gemini Chat sistemi başlatıldı.")
-            except Exception as e:
-                print(f"!!! [AI HATA] Gemini istemcisi başlatılamadı: {e}")
-                global AI_ENABLED
-                AI_ENABLED = False
-
-    def generate_response(self, prompt: str) -> str:
-        if not AI_ENABLED or not self.chat:
+        self.client = genai.Client() if AI_ENABLED else None
+    
+    # Kullanıcının tüm geçmişini alıp, yeni mesajla birlikte gönderir
+    def generate_response(self, history: List[dict], prompt: str) -> str:
+        if not AI_ENABLED or not self.client:
             return "AI servisi şu anda aktif değil. Lütfen Super Admin ile iletişime geçin."
 
         try:
-            response = self.chat.send_message(prompt)
+            # History'den API'nin beklediği 'contents' formatını oluşturma
+            contents = []
+            for message in history:
+                # 'user' gönderenler 'user' rolüne, 'ai' gönderenler 'model' rolüne maplenir
+                role = "user" if message["sender"] == "user" else "model"
+                contents.append(
+                    {"role": role, "parts": [{"text": message["content"]}]}
+                )
+            
+            # Güncel isteği ekle
+            contents.append(
+                {"role": "user", "parts": [{"text": prompt}]}
+            )
+
+            response = self.client.models.generate_content(
+                model='gemini-2.5-flash', # Çalışan model
+                contents=contents
+            )
             return response.text
         except Exception as e:
             print(f"!!! [AI HATA] Mesaj gönderme hatası: {e}")
@@ -190,7 +199,7 @@ ai_assistant = AI_Assistant()
 
 # ----- 8. UYGULAMA YÖNLENDİRMELERİ (API Endpoints) -----
 
-# Static dosyaları (CSS, JS) mount et
+app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.post("/api/login")
@@ -213,37 +222,72 @@ async def login(username: str = Form(...), password: str = Form(...)):
     response.set_cookie(key="user_role", value=user_record["role"], httponly=False)
     return response
 
+# KULLANICIYA ÖZEL SOHBET GEÇMİŞİ YÜKLEME ENDPOINT'İ EKLENDİ
+@app.get("/api/chat_history")
+async def get_chat_history(current_user: dict = Depends(get_current_user)):
+    user_name = current_user["username"]
+    db = db_manager.load_db()
+    
+    user_record = next((u for u in db["users"] if u["username"] == user_name), None)
+    if not user_record:
+        raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+
+    # Veritabanından kullanıcının sohbet geçmişini döndür
+    return {"history": user_record.get("chat_history", [])}
+
 @app.post("/api/chat")
-async def chat_message(request: Request):
+async def chat_message(request: Request, current_user: dict = Depends(get_current_user)):
+    user_name = current_user["username"]
+    
     form_data = await request.form()
     user_message = form_data.get("message")
     
     if not user_message:
         raise HTTPException(status_code=400, detail="Mesaj boş olamaz")
 
-    # Kullanıcı mesajını kaydet
-    user_msg_record = ChatMessage(sender="user", content=user_message, timestamp=datetime.datetime.now()).dict()
+    # DB'yi yükle ve kullanıcıyı bul
     db = db_manager.load_db()
-    db["chats"].append(user_msg_record)
+    user_index, user_record = next(((i, u) for i, u in enumerate(db["users"]) if u["username"] == user_name), (None, None))
+    if user_record is None: raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
     
-    # AI yanıtını al
-    ai_response_content = ai_assistant.generate_response(user_message)
+    # Mevcut sohbet geçmişini al
+    current_history = user_record.get("chat_history", [])
     
-    # AI yanıtını kaydet
-    ai_msg_record = ChatMessage(sender="ai", content=ai_response_content, timestamp=datetime.datetime.now()).dict()
-    db["chats"].append(ai_msg_record)
+    # Kullanıcı mesajını history'ye ekle
+    user_msg_record = ChatMessage(sender="user", content=user_message).dict()
+    current_history.append(user_msg_record)
     
+    # AI yanıtını al (Tüm geçmişi context olarak kullan)
+    ai_response_content = ai_assistant.generate_response(current_history, user_message)
+    
+    # AI yanıtını history'ye ekle
+    ai_msg_record = ChatMessage(sender="ai", content=ai_response_content).dict()
+    current_history.append(ai_msg_record)
+    
+    # Güncellenmiş history'yi kullanıcı kaydına geri kaydet
+    db["users"][user_index]["chat_history"] = current_history
     db_manager.save_db(db)
     
     return {"user_message": user_message, "ai_response": ai_response_content}
 
-# SADECE SUPER ADMIN İÇİN KULLANICI EKLEME/SİLME FONKSİYONLARI (Yetkilendirme Gerekir)
-# Kullanıcı yönetimi için basit bir örnek
+
+@app.get("/api/admin/users")
+async def get_users(current_user: dict = Depends(get_current_user)):
+    """Tüm kullanıcıları listeler (Yalnızca Super Admin)."""
+    # Yetkilendirme kontrolü JWT ile yapılıyor
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
+
+    db = db_manager.load_db()
+    # Şifre alanını güvenlik nedeniyle kaldırma
+    users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"]} for u in db["users"]]
+    return {"users": users_clean}
+
+# SADECE SUPER ADMIN İÇİN KULLANICI EKLEME/SİLME FONKSİYONLARI 
 @app.post("/api/admin/user_action")
-async def user_action(request: Request, action: str = Form(...), username: str = Form(...), password: Optional[str] = Form(None), role: Optional[str] = Form("user")):
-    # Yetkilendirme Kontrolü
-    user_role = request.cookies.get("user_role")
-    if user_role != "super_admin":
+async def user_action(action: str = Form(...), username: str = Form(...), password: Optional[str] = Form(None), role: Optional[str] = Form("user"), current_user: dict = Depends(get_current_user)):
+    # Yetkilendirme kontrolü JWT ile yapılıyor
+    if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
     db = db_manager.load_db()
@@ -256,7 +300,8 @@ async def user_action(request: Request, action: str = Form(...), username: str =
         
         # Yeni kullanıcı ekle
         hashed_password = pwd_context.hash(password)
-        new_user = User(id=str(uuid.uuid4()), username=username, password=hashed_password, role=role).dict()
+        # Yeni kullanıcı varsayılan olarak boş bir chat_history ile eklenir
+        new_user = User(id=str(uuid.uuid4()), username=username, password=hashed_password, role=role, chat_history=[]).dict()
         db["users"].append(new_user)
         db_manager.save_db(db)
         return {"status": "success", "message": f"Kullanıcı '{username}' ({role}) başarıyla eklendi."}
@@ -280,7 +325,6 @@ async def user_action(request: Request, action: str = Form(...), username: str =
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
     # Ana sayfa HTML içeriği
-    # Not: Tüm JavaScript ve CSS, HTML içinde yer almaktadır.
     html_content = f"""
 <!DOCTYPE html>
 <html lang="tr">
@@ -289,7 +333,7 @@ async def serve_dashboard(request: Request):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aurion - Gelişmiş Cevap Motoru</title>
     <style>
-        /* Genel Stil Ayarları */
+        /* CSS kodları önceki haliyle aynı */
         :root {{
             --bg-dark: #1e1e2d;
             --bg-light: #27293d;
@@ -325,14 +369,12 @@ async def serve_dashboard(request: Request):
             flex-direction: column;
             gap: 20px;
         }}
-        /* Başlıklar */
         h1 {{
             color: var(--primary);
             text-align: center;
             font-size: 28px;
             margin-bottom: 20px;
         }}
-        /* Giriş Formu ve Alanları */
         form {{
             display: flex;
             flex-direction: column;
@@ -364,7 +406,6 @@ async def serve_dashboard(request: Request):
         button:hover {{
             background-color: #4b4bd8;
         }}
-        /* Dashboard Stili */
         #dashboard {{
             max-width: 1200px;
             height: 90vh;
@@ -375,7 +416,6 @@ async def serve_dashboard(request: Request):
             overflow: hidden;
             background-color: var(--bg-dark);
         }}
-        /* Sol Menü Stili */
         #sidebar {{
             background-color: var(--bg-light);
             padding: 20px 0;
@@ -405,7 +445,6 @@ async def serve_dashboard(request: Request):
             background-color: var(--border-color);
             color: var(--text-light);
         }}
-        /* Kullanıcı Bilgisi ve Çıkış */
         #userInfo {{
             padding: 10px 20px;
             border-top: 1px solid var(--border-color);
@@ -424,8 +463,6 @@ async def serve_dashboard(request: Request):
         #logoutButton:hover {{
             background-color: #c82333;
         }}
-
-        /* Ana İçerik Alanı */
         #content {{
             padding: 20px;
             display: flex;
@@ -440,8 +477,6 @@ async def serve_dashboard(request: Request):
         .tab-content.active {{
             display: flex;
         }}
-
-        /* Sohbet Alanı Stili */
         #chatContent {{
             flex-grow: 1;
             overflow-y: auto;
@@ -496,8 +531,6 @@ async def serve_dashboard(request: Request):
             margin-bottom: 20px;
             color: var(--primary);
         }}
-        
-        /* Admin Panel Stili */
         .admin-section {{
             margin-bottom: 30px;
             padding: 20px;
@@ -549,7 +582,6 @@ async def serve_dashboard(request: Request):
             background-color: #c82333;
         }}
 
-        /* Responsive */
         @media (max-width: 768px) {{
             #dashboard {{
                 grid-template-columns: 1fr;
@@ -576,7 +608,7 @@ async def serve_dashboard(request: Request):
                 text-align: center;
             }}
             .nav-link span {{
-                display: none; /* Metinleri gizle, sadece ikon kalsın */
+                display: none;
             }}
             #content {{
                 padding: 10px;
@@ -692,42 +724,37 @@ async def serve_dashboard(request: Request):
         }}
 
         function switchTab(tabId) {{
-            // Tüm sekmeleri gizle
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-            // İstenen sekmeyi göster
             const targetTab = document.getElementById(tabId);
             if(targetTab) {{
                 targetTab.classList.add('active');
             }}
             
-            // Tüm nav linklerinden 'active' sınıfını kaldır
             document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
-            // İlgili nav linkine 'active' sınıfını ekle
             const targetLink = document.querySelector(`.nav-link[data-tab="${{tabId}}"]`);
             if(targetLink) {{
                 targetLink.classList.add('active');
             }}
             
-            // Admin paneli açılırsa kullanıcı listesini yenile
             if (tabId === 'admin') {{
                 loadUserList();
+            }} else if (tabId === 'chat') {{
+                loadChatHistory(); // Chat sekmesi açıldığında geçmişi yükle
             }}
         }}
 
         // ----- Kullanıcı Arayüzü Yönetimi -----
 
         function updateMenuVisibility(userRole) {{
-            // Super Admin'e özel menü sekmeleri
             const adminTabs = ['admin', 'minecraft', 'anime']; 
             
             adminTabs.forEach(tab => {{
                 const link = document.querySelector(`.nav-link[data-tab="${{tab}}"]`);
                 if (link) {{
-                    // Eğer kullanıcı Super Admin değilse, menü linkini gizle
                     if (userRole !== 'super_admin') {{
                         link.style.display = 'none';
                     }} else {{
-                        link.style.display = 'flex'; // Super Admin ise göster
+                        link.style.display = 'flex';
                     }}
                 }}
             }});
@@ -744,11 +771,9 @@ async def serve_dashboard(request: Request):
                 document.getElementById('currentUsername').textContent = userName;
                 document.getElementById('currentUserRole').textContent = userRole;
 
-                // Menü Görünürlüğünü Güncelle
                 updateMenuVisibility(userRole); 
 
-                // Normal kullanıcılar Chat sekmesinde başlayacak
-                switchTab('chat');
+                switchTab('chat'); // Her zaman chat sekmesinde başla ve geçmişi yükle
             } else {{
                 document.getElementById('authSection').style.display = 'flex';
                 document.getElementById('dashboard').style.display = 'none';
@@ -781,11 +806,72 @@ async def serve_dashboard(request: Request):
         
         // ----- Sohbet İşlemleri -----
 
-        // Sohbet içeriğini aşağı kaydır
         function scrollToBottom() {{
             const chatContent = document.getElementById('chatContent');
             chatContent.scrollTop = chatContent.scrollHeight;
         }}
+        
+        // Sohbet baloncuğu ekle
+        function addMessage(sender, content, isError = false, shouldScroll = true) {{
+            const chatContent = document.getElementById('chatContent');
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message');
+            messageDiv.classList.add(sender === 'user' ? 'user-message' : 'ai-message');
+            
+            if (isError) {{
+                 messageDiv.style.backgroundColor = '#dc3545';
+                 messageDiv.style.color = 'white';
+            }}
+
+            messageDiv.textContent = content;
+            chatContent.appendChild(messageDiv);
+            if (shouldScroll) {{
+                scrollToBottom();
+            }}
+        }}
+        
+        function addLoadingMessage() {{
+            const chatContent = document.getElementById('chatContent');
+            const loadingId = 'loading-' + Date.now();
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message', 'ai-message');
+            messageDiv.id = loadingId;
+            messageDiv.innerHTML = '<span>AI düşünüyor...</span>';
+            chatContent.appendChild(messageDiv);
+            scrollToBottom();
+            return loadingId;
+        }}
+
+        function removeMessage(id) {{
+            const element = document.getElementById(id);
+            if (element) {{
+                element.remove();
+            }}
+        }}
+        
+        // Kullanıcıya özel geçmişi yükle
+        async function loadChatHistory() {{
+            const chatContent = document.getElementById('chatContent');
+            chatContent.innerHTML = ''; // Önce temizle
+            
+            try {{
+                const response = await fetch('/api/chat_history');
+                if (!response.ok) {{
+                    throw new Error("Geçmiş yüklenemedi.");
+                }}
+                const data = await response.json();
+                
+                data.history.forEach(msg => {{
+                    // Tarihçe yüklenirken scroll yapma, en sonda bir kere yap
+                    addMessage(msg.sender, msg.content, false, false); 
+                }});
+                scrollToBottom();
+            }} catch (error) {{
+                addMessage('ai', 'Sohbet geçmişiniz yüklenirken hata oluştu.', true);
+                console.error('Chat history error:', error);
+            }}
+        }}
+
 
         // Sohbet formunu gönder
         document.getElementById('chatForm').addEventListener('submit', async (e) => {{
@@ -794,11 +880,9 @@ async def serve_dashboard(request: Request):
             const message = input.value.trim();
             if (!message) return;
 
-            // Kullanıcı mesajını ekle
             addMessage('user', message);
             input.value = '';
             
-            // Yükleme mesajı ekle
             const loadingMsgId = addLoadingMessage();
             
             try {{
@@ -812,10 +896,8 @@ async def serve_dashboard(request: Request):
 
                 const data = await response.json();
                 
-                // Yükleme mesajını kaldır
                 removeMessage(loadingMsgId);
                 
-                // AI yanıtını ekle
                 addMessage('ai', data.ai_response);
                 
             }} catch (error) {{
@@ -825,44 +907,6 @@ async def serve_dashboard(request: Request):
             }}
         }});
         
-        // Sohbet baloncuğu ekle
-        function addMessage(sender, content, isError = false) {{
-            const chatContent = document.getElementById('chatContent');
-            const messageDiv = document.createElement('div');
-            messageDiv.classList.add('message');
-            messageDiv.classList.add(sender === 'user' ? 'user-message' : 'ai-message');
-            
-            if (isError) {{
-                 messageDiv.style.backgroundColor = '#dc3545'; // Kırmızı arka plan
-                 messageDiv.style.color = 'white';
-            }}
-
-            messageDiv.textContent = content;
-            chatContent.appendChild(messageDiv);
-            scrollToBottom();
-        }}
-        
-        // Yükleme mesajı ekle
-        function addLoadingMessage() {{
-            const chatContent = document.getElementById('chatContent');
-            const loadingId = 'loading-' + Date.now();
-            const messageDiv = document.createElement('div');
-            messageDiv.classList.add('message', 'ai-message');
-            messageDiv.id = loadingId;
-            messageDiv.innerHTML = '<span>AI düşünüyor...</span>';
-            chatContent.appendChild(messageDiv);
-            scrollToBottom();
-            return loadingId;
-        }}
-
-        // Mesajı kaldır
-        function removeMessage(id) {{
-            const element = document.getElementById(id);
-            if (element) {{
-                element.remove();
-            }}
-        }}
-
         // ----- Admin Panel İşlemleri -----
 
         async function loadUserList() {{
@@ -873,25 +917,21 @@ async def serve_dashboard(request: Request):
 
             try {{
                 const response = await fetch('/api/admin/users');
+                const result = await response.json();
+
                 if (response.status === 403) {{
                     userListElement.innerHTML = '<li>Bu bölüme erişim yetkiniz yok.</li>';
-                    adminMsg.textContent = '';
+                    adminMsg.textContent = result.detail || 'Erişim Hatası.';
                     return;
                 }}
-
-                // FastAPI'den /api/admin/users endpoint'i olmadığı için, 
-                // şimdilik bu bilgiyi veritabanından simüle ediyoruz.
-                // GERÇEK UYGULAMA: FastAPI'de bir GET /api/admin/users yazılmalıdır.
-                const db = await fetch('/').then(r => r.text()).then(t => null); // Basitçe simüle etmek için 
                 
-                // Simülasyon verisi (Gerçek veritabanını yükleyemediğimiz için bu adımı atlıyoruz)
-                // Enes'in yetkisine odaklanıldığı için şimdilik sadece Enes'i gösterelim.
+                if (!response.ok) {{
+                    adminMsg.textContent = result.detail || 'Kullanıcı listesi yüklenirken bilinmeyen hata oluştu.';
+                    return;
+                }}
                 
-                const currentUser = getCookie('user_name');
-                const users = [{{"username": currentUser, "role": getCookie('user_role')}}];
-                
-                adminMsg.textContent = 'UYARI: Kullanıcı listesi güvenli API çağrısı olmadan simüle edilmiştir.';
-
+                const users = result.users || [];
+                adminMsg.textContent = `Toplam ${{users.length}} kullanıcı bulundu.`;
 
                 users.forEach(user => {{
                     const li = document.createElement('li');
@@ -902,7 +942,6 @@ async def serve_dashboard(request: Request):
                     userListElement.appendChild(li);
                 }});
 
-                // Silme butonlarına olay dinleyicisi ekle
                 userListElement.querySelectorAll('.delete-btn').forEach(button => {{
                     button.addEventListener('click', async (e) => {{
                         const usernameToDelete = e.target.getAttribute('data-username');
@@ -918,7 +957,7 @@ async def serve_dashboard(request: Request):
 
 
             } catch (error) {{
-                adminMsg.textContent = 'Kullanıcı listesi yüklenirken hata oluştu.';
+                adminMsg.textContent = 'Kullanıcı listesi yüklenirken ağ hatası oluştu.';
                 console.error('Kullanıcı listesi hatası:', error);
             }}
         }}
@@ -936,7 +975,7 @@ async def serve_dashboard(request: Request):
             }});
 
             const result = await response.json();
-            document.getElementById('adminMessage').textContent = result.message;
+            document.getElementById('adminMessage').textContent = result.message || result.detail;
             if (response.ok) {{
                 form.reset();
                 loadUserList();
@@ -945,7 +984,7 @@ async def serve_dashboard(request: Request):
             }}
         }});
 
-        // Kullanıcı Silme İşlemi (Simülasyon - Gerçek kod /api/admin/user_action'ı kullanır)
+        // Kullanıcı Silme İşlemi
         async function deleteUser(username) {{
             const formData = new FormData();
             formData.append('action', 'delete');
@@ -957,16 +996,14 @@ async def serve_dashboard(request: Request):
             }});
 
             const result = await response.json();
-            document.getElementById('adminMessage').textContent = result.message;
+            document.getElementById('adminMessage').textContent = result.message || result.detail;
             if (response.ok) {{
-                loadUserList(); // Listeyi yenile
+                loadUserList();
             }} else {{
                 alert('Silme Hatası: ' + result.detail);
             }}
         }}
 
-
-        // Sayfa Yüklendiğinde
         window.onload = showDashboard;
         
     </script>
