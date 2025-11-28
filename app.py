@@ -81,7 +81,7 @@ class Database:
         return {
             "users": [],
             "chats": [],
-            "commands": [],
+            "commands": [], # Komutlar listesi
             "bans": [],
             "minecraft_bots": [],
             "anime_videos": []
@@ -139,6 +139,11 @@ class Database:
     async def clear_chats(self, username):
         self.data = await self.load()
         self.data["chats"] = [c for c in self.data["chats"] if c["username"] != username]
+        await self.save()
+
+    async def add_command(self, command):
+        self.data = await self.load()
+        self.data["commands"].append(command)
         await self.save()
     
     async def add_ban(self, ban):
@@ -249,7 +254,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     
     return user
 
-# ====== MODELS (Anime kısmı revize edildi) ======
+# ====== MODELS (CommandRequest Eklendi) ======
 class RegisterRequest(BaseModel):
     username: str
     password: str
@@ -266,7 +271,11 @@ class BanRequest(BaseModel):
     username: str
     reason: str
 
-# Yeni gereksinime göre Anime modeli (Metni dublaja çevirir, AI script üretmez)
+# !!! EKLENDİ (Resim 1000002580.jpg'deki NameError hatasını çözmek için) !!!
+class CommandRequest(BaseModel):
+    command: str
+    args: Optional[List[str]] = []
+
 class AnimeRequest(BaseModel):
     script: str  # Var olan bölümden alınan diyalog metni
     character: Optional[str] = "Anime Karakteri"
@@ -280,7 +289,7 @@ class MinecraftBotCreate(BaseModel):
     server_ip: str
     server_port: int = 25565
 
-# ====== AI HELPER (Anime script üretme fonksiyonu çıkarıldı) ======
+# ====== AI HELPER (Aynı Kaldı) ======
 class AIAssistant:
     def __init__(self):
         self.modes = {
@@ -288,6 +297,7 @@ class AIAssistant:
             "düşman": "Sen sert, eleştirel ve meydan okuyan birisin. Keskin ve provokatif konuş.",
             "öğretmen": "Sen sabırlı, bilgili ve açıklayıcı bir öğretmensin. Her şeyi detaylı ve anlaşılır şekilde anlat."
         }
+        # Önceki hataları gidermek için model sabitlendi (Resim 1000002576.jpg)
         self.chat_model = 'gemini-2.5-flash' 
     
     async def chat(self, message: str, mode: str = "arkadaş", history: List = []):
@@ -312,7 +322,6 @@ class AIAssistant:
 
             return response.text
         except APIError as e:
-            # Resim 1000002576.jpg'daki "404 models/gemini-pro" hatasını yakalar.
             return f"❌ AI Modeli Hatası (404/API): Lütfen API anahtarınızı ve model adını kontrol edin. Hata: {e}"
         except Exception as e:
             return f"❌ Genel Hata: {str(e)}"
@@ -328,7 +337,6 @@ class TTSEngine:
                 self.engine = pyttsx3.init()
                 voices = self.engine.getProperty('voices')
                 for voice in voices:
-                    # Türkçe ses bulma mantığı korunur
                     if 'turkish' in voice.name.lower() or 'tr' in voice.id.lower():
                         self.engine.setProperty('voice', voice.id)
                         break
@@ -364,9 +372,9 @@ app.add_middleware(
 )
 
 # ====== WORKER LOGIC (Aynı Kaldı) ======
-
 async def minecraft_worker_logic():
     print("⛏️ Minecraft Bot Worker Başlatıldı.")
+    # ... (Minecraft worker logic) ...
     while True:
         try:
             bots = await db.get_minecraft_bots()
@@ -379,6 +387,7 @@ async def minecraft_worker_logic():
                 if bot.get("status") != "online":
                     await db.update_minecraft_bot(bot_id, {"status": "online"})
                 
+                # Simüle ekran URL'si
                 screen_url = f"/static/img/sim/screen_{bot_id}_{int(time.time())}.jpg"
                 await db.update_minecraft_bot(bot_id, {"screen_url": screen_url})
 
@@ -416,10 +425,11 @@ async def minecraft_worker_logic():
 
 async def anime_producer_logic():
     print("🎬 Anime Producer Worker Başlatıldı.")
+    # ... (Anime worker logic) ...
     while True:
         try:
             all_videos = await db.get_anime_videos(SUPER_ADMIN_USERNAME) 
-            pending_videos = [v for v in all_videos if v.get("status") == "video_pending"]
+            pending_videos = [v for v v.get("status") == "video_pending"]
             
             if not pending_videos:
                 pass
@@ -456,7 +466,7 @@ async def anime_producer_logic():
         await asyncio.sleep(WORKER_LOOP_INTERVAL)
 
 
-# ====== ENDPOINTS (Anime endpoint'i revize edildi) ======
+# ====== ENDPOINTS (Aynı Kaldı) ======
 
 @app.post("/api/register")
 async def register(req: RegisterRequest):
@@ -511,8 +521,6 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
     await db.add_chat(chat_record)
     return {"response": ai_response, "mode": req.mode or user_mode}
 
-# ... (Diğer /api/chat/history, /api/command, /api/admin/* endpoints'leri aynı kaldı) ...
-
 @app.get("/api/chat/history")
 async def get_chat_history(current_user: dict = Depends(get_current_user)):
     history = await db.get_chats(current_user["username"])
@@ -523,6 +531,7 @@ async def clear_chat_history(current_user: dict = Depends(get_current_user)):
     await db.clear_chats(current_user["username"])
     return {"message": "Chat history cleared"}
 
+# CommandRequest modelinin eklenmesinden sonra artık hata vermeyecek
 @app.post("/api/command")
 async def execute_command(req: CommandRequest, current_user: dict = Depends(get_current_user)):
     username = current_user["username"]
@@ -592,7 +601,6 @@ async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_cur
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Only super admin can generate anime videos")
     
-    # Yeni mantık: Kullanıcının verdiği script'i (diyaloğu) doğrudan TTS'e çevir.
     script = req.script
     if not script:
         raise HTTPException(status_code=400, detail="Anime dublajı için script alanı boş bırakılamaz.")
@@ -601,26 +609,23 @@ async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_cur
     audio_path = Path(f"static/audio/{audio_filename}")
     audio_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # TTS işlemini await ile çağır
     audio_success = await tts_engine.text_to_speech_file(script, str(audio_path))
     
     video_record = {
         "id": str(uuid.uuid4()),
-        "script": script, # Artık prompt yerine script kaydediliyor
+        "script": script, 
         "character": req.character,
         "audio_url": f"/static/audio/{audio_filename}" if audio_success else None,
         "video_url": None,
         "created_by": current_user["username"],
         "created_at": datetime.utcnow().isoformat(),
-        "status": "video_pending" if audio_success else "audio_failed" # Başarılıysa video worker'ı beklesin
+        "status": "video_pending" if audio_success else "audio_failed" 
     }
     
-    # Audio başarılıysa, worker'ın işleyeceği şekilde kaydet.
     if audio_success:
         await db.add_anime_video(video_record)
         return {"video": video_record, "message": "Anime diyalog sesi oluşturuldu. Video üretimi arka planda başlıyor..."}
     else:
-        # Eğer TTS başarısız olursa yine de kaydet ve hata mesajı döndür
         await db.add_anime_video(video_record) 
         return {"video": video_record, "message": "Diyalog metni kaydedildi ancak ses dosyası oluşturulamadı (TTS Motoru Hatası).", "error": True}
 
@@ -672,7 +677,7 @@ async def send_bot_command(req: MinecraftBotCommand, current_user: dict = Depend
     
     return {"message": "Komut gönderildi. Bot worker'ı kısa süre içinde işleme başlayacak.", "command": req.command}
 
-# ====== FRONTEND HTML (Tasarım ve Anime kısmı revize edildi) ======
+# ====== FRONTEND HTML (Syntax Hatası Giderildi) ======
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     html = """
@@ -708,7 +713,7 @@ async def serve_frontend():
                 display: flex;
             }
             
-            /* GİRİŞ TASARIMI DÜZELTİLDİ */
+            /* GİRİŞ TASARIMI */
             #authSection {
                 width: 100%;
                 display: flex;
@@ -716,7 +721,7 @@ async def serve_frontend():
                 align-items: center;
             }
             .auth-card {
-                max-width: 450px; /* Daha geniş */
+                max-width: 450px; 
                 width: 90%;
                 margin: 50px auto;
                 background-color: var(--surface);
@@ -825,36 +830,6 @@ async def serve_frontend():
                 flex-direction: column;
             }
             
-            /* Header / User Info */
-            .header-bar {
-                background-color: var(--surface);
-                padding: 15px 25px;
-                border-radius: 10px;
-                margin-bottom: 20px;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            }
-            .header-bar span {
-                font-weight: 700;
-                font-size: 1.1rem;
-            }
-
-            /* Tab Content */
-            .tab-content {
-                display: none;
-                background-color: var(--surface);
-                padding: 30px;
-                border-radius: 10px;
-                flex-grow: 1;
-                overflow-y: auto; 
-            }
-            .tab-content.active {
-                display: flex;
-                flex-direction: column;
-            }
-            
             /* Chat */
             .mode-selector {
                 display: flex;
@@ -880,7 +855,7 @@ async def serve_frontend():
                 background: #383a48;
                 border-radius: 8px;
                 padding: 15px;
-                height: 600px; /* Daha geniş */
+                height: 600px;
                 overflow-y: auto;
                 margin-bottom: 20px;
                 display: flex;
@@ -904,7 +879,7 @@ async def serve_frontend():
                 color: var(--text);
                 align-self: flex-start;
                 border-bottom-left-radius: 5px;
-                white-space: pre-wrap; /* Cevapların düzenli görünmesi için */
+                white-space: pre-wrap; 
             }
             .chat-input {
                 display: flex;
@@ -938,20 +913,18 @@ async def serve_frontend():
             .status-offline { color: var(--danger); }
             .status-pending { color: orange; }
 
-            /* Anime Dublaj */
-            #animeScript {
-                width: 100%;
-                min-height: 150px;
-                padding: 12px;
-                border: 1px solid #44475a;
-                border-radius: 6px;
-                background-color: #383a48;
-                color: var(--text);
-                font-size: 1rem;
-                resize: vertical;
+            /* Minecraft */
+            .bot-command-input {
+                display: flex;
+                gap: 5px;
+                margin-top: 10px;
             }
-            #animeHistory .data-card {
-                border-left-color: #f7a040;
+            .bot-screen-img {
+                width: 100%;
+                height: auto;
+                margin-top: 10px;
+                border-radius: 4px;
+                border: 1px solid #44475a;
             }
         </style>
     </head>
@@ -1280,7 +1253,7 @@ async def serve_frontend():
                 `).join('') || '<p style="color: var(--text-light);">Yasaklı kullanıcı yok</p>' : '<p style="color: var(--text-light);">Yasaklama verisi yüklenemedi.</p>';
             }
 
-            // Anime Functions (Revize Edildi)
+            // Anime Functions
             async function generateAnime() {
                 const script = document.getElementById('animeScript').value;
                 const character = document.getElementById('animeCharacter').value;
@@ -1322,7 +1295,7 @@ async def serve_frontend():
                                 <video controls src="${video.video_url}" style="width: 100%; max-height: 200px; margin-top: 10px; background: black;"></video>
                             `;
                         } else if (video.status === 'video_pending' || video.status === 'producing') {
-                            statusText = `⏳ ${video.status.toUpperCase()}`;
+                            statusText = '⏳ ' + video.status.toUpperCase().replace('_', ' ');
                             statusColor = 'orange';
                             mediaContent = video.audio_url ? `<audio controls src="${video.audio_url}" style="width: 100%; margin-top: 10px;"></audio><p style="color: orange; margin-top: 10px;">Video üretimi sürüyor...</p>` : '';
                         } else {
@@ -1343,7 +1316,7 @@ async def serve_frontend():
                 }
             }
 
-            // Minecraft Functions (Aynı Kaldı)
+            // Minecraft Functions
             async function createBot() {
                 const botName = document.getElementById('botName').value;
                 const serverIp = document.getElementById('serverIp').value;
@@ -1376,7 +1349,7 @@ async def serve_frontend():
                     data.bots.forEach(bot => {
                         const statusClass = bot.status === 'online' ? 'status-online' : 'status-offline';
                         const statusText = bot.status === 'online' ? '🟢 Online' : '🔴 Offline';
-                        const commandInputId = `cmd_${bot.id}`;
+                        const commandInputId = 'cmd_' + bot.id; // JavaScript tarafında tek tırnak kullan
                         const statusColor = bot.status === 'online' ? 'var(--success)' : 'var(--danger)';
                         
                         const screenUrl = bot.screen_url ? bot.screen_url : '/static/img/sim/default_screen.png';
@@ -1385,7 +1358,8 @@ async def serve_frontend():
                         const card = document.createElement('div');
                         card.className = 'data-card';
                         card.style.borderLeftColor = statusColor;
-
+                        
+                        // !!! Düzeltme: HTML içindeki JS çağrılarında tırnak kullanımı kontrol edildi.
                         card.innerHTML = `
                             <strong>${bot.bot_name}</strong>
                             <span class="${statusClass}">(${statusText})</span><br>
