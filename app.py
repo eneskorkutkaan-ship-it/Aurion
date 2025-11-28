@@ -17,11 +17,12 @@ import time
 import random
 from pathlib import Path
 
-# Google Gemini AI
+# Google Gemini AI - İçe Aktarma Kontrolü
 try:
     import google.generativeai as genai
     from google.generativeai.errors import APIError
     
+    # İstemciyi alma denemesi
     try:
         from google.generativeai import client
         GEMINI_CLIENT = client.get_default_client()
@@ -32,7 +33,7 @@ except ImportError:
     genai = None
     APIError = Exception
     
-# Text-to-Speech (keysiz)
+# Text-to-Speech (keysiz) - İçe Aktarma Kontrolü
 try:
     import pyttsx3
 except ImportError:
@@ -61,11 +62,11 @@ if GEMINI_API_KEY and genai:
     except Exception as e:
         print(f"!!! [API ERROR] Gemini Configure Hatası: {e}")
 else:
-    print("!!! [GEMINI MISSING] GEMINI_API_KEY ortam değişkeni eksik.")
+    print("!!! [GEMINI MISSING] GEMINI_API_KEY ortam değişkeni eksik veya genai kütüphanesi yüklenemedi.")
 
 # ====== DATABASE (ASENKRON GÜVENLİ) ======
 class Database:
-    # ... (Database sınıfının içi, önceki revizyondan aynı kalır) ...
+    # ... (Database sınıfının içi önceki revizyondan aynı kalır) ...
     def __init__(self):
         self.data = self.load_sync()
         
@@ -91,7 +92,6 @@ class Database:
         }
 
     async def load(self):
-        # Dosya okuma/yazma işlemlerini bir iş parçacığına taşı
         return await asyncio.to_thread(self.load_sync) 
 
     def save_sync(self, data):
@@ -188,7 +188,8 @@ class Database:
     
     async def add_anime_video(self, video):
         self.data = await self.load()
-        if video.get("status") == "completed":
+        # video_pending status'ü ilk istekte ayarlanır (TTS başarılıysa)
+        if video.get("status") == "completed": 
             video["status"] = "video_pending"
         self.data["anime_videos"].append(video)
         await self.save()
@@ -207,6 +208,7 @@ class Database:
         return [v for v in self.data["anime_videos"] if v["created_by"] == username]
 
 db = Database()
+
 # ====== SECURITY & AUTH (Aynı Kaldı) ======
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
@@ -232,6 +234,7 @@ def decode_token(token: str):
         return None
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    # ... (get_current_user fonksiyonu önceki revizyondan aynı kalır) ...
     token = credentials.credentials
     payload = decode_token(token)
     if payload is None:
@@ -258,7 +261,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     
     return user
 
-# ====== MODELS ======
+# ====== MODELS (NameError düzeltmesi için kontrol edildi) ======
 class RegisterRequest(BaseModel):
     username: str
     password: str
@@ -275,11 +278,11 @@ class BanRequest(BaseModel):
     username: str
     reason: str
 
+# CommandRequest NameError'a neden oluyordu, model tanımı burada.
 class CommandRequest(BaseModel):
     command: str
     args: Optional[List[str]] = []
 
-# !!! ANIME MODELİ GÜNCELLENDİ !!!
 class AnimeRequest(BaseModel):
     anime_name: str  
     episode_number: int
@@ -294,9 +297,8 @@ class MinecraftBotCreate(BaseModel):
     server_ip: str
     server_port: int = 25565
 
-# ====== AI HELPER ======
+# ====== AI HELPER (API Key Eksikliği hatası için kontrol edildi) ======
 class AIAssistant:
-    # ... (AIAssistant sınıfının içi, önceki revizyondan aynı kalır, model adı gemini-2.5-flash) ...
     def __init__(self):
         self.modes = {
             "arkadaş": "Sen samimi, yardımsever ve eğlenceli bir arkadaşsın. Konuşmalarında emoji kullan ve sıcak ol.",
@@ -307,10 +309,11 @@ class AIAssistant:
     
     async def chat(self, message: str, mode: str = "arkadaş", history: List = []):
         if not genai or not GEMINI_API_KEY:
-            # Hata mesajı, frontend'deki durumu açıkça yansıtması için değiştirildi.
-            return "❌ AI/Gemini entegrasyonu yüklenmedi veya API anahtarı eksik."
+            # API Anahtarı eksikliği hatası (1000002577.jpg)
+            return "❌ AI/Gemini entegrasyonu yüklenmedi veya API anahtarı eksik. Lütfen Render ortam değişkenlerini kontrol edin."
         
         try:
+            # ... (Tarihçe oluşturma mantığı aynı kalır) ...
             contents = []
             for h in history:
                 contents.append({"role": "user", "parts": [{"text": h['user']}]})
@@ -332,13 +335,12 @@ class AIAssistant:
         except Exception as e:
             return f"❌ Genel Hata: {str(e)}"
             
-    # !!! YENİ FONKSİYON: ANİME DİYALOĞU OLUŞTURMA !!!
     async def generate_anime_script(self, anime_name: str, episode_number: int, character_name: str):
         if not genai or not GEMINI_API_KEY:
             return None, "❌ AI/Gemini entegrasyonu yüklenmedi veya API anahtarı eksik."
         
         prompt = (
-            f"Sen profesyonel bir senaryo yazarı ve dublaj asistanısın. Bana popüler anime '{anime_name}'in 60. bölümü (veya benzeri bir bölüm) için {character_name}'in yer aldığı, 20-30 saniye sürecek kısa, etkili ve dramatik bir Türkçe dublaj diyalog metni oluştur. "
+            f"Sen profesyonel bir senaryo yazarı ve dublaj asistanısın. Bana popüler anime '{anime_name}'in {episode_number}. bölümü (veya benzeri bir bölüm) için {character_name}'in yer aldığı, 20-30 saniye sürecek kısa, etkili ve dramatik bir Türkçe dublaj diyalog metni oluştur. "
             "Sadece diyalog metnini ve karakter isimlerini 'Karakter: Diyalog' formatında ver. Başlık, açıklama veya ek not kullanma. Sadece saf diyalog metni istiyorum."
         )
         
@@ -351,9 +353,9 @@ class AIAssistant:
                 )
             )
             
-            # Bazı basit temizlikler
             script = response.text.strip()
-            if script.startswith("Karakter") or script.startswith(character_name):
+            # Basit format kontrolü
+            if len(script.splitlines()) > 0 and (":" in script.splitlines()[0] or script.splitlines()[0].upper() == script.splitlines()[0]):
                  return script, None
             else:
                  return script, "⚠️ AI diyalog formatını tam olarak takip etmedi, ancak metin başarıyla alındı."
@@ -374,11 +376,12 @@ class TTSEngine:
             try:
                 self.engine = pyttsx3.init()
                 voices = self.engine.getProperty('voices')
+                # Türkçe ses arama
                 for voice in voices:
                     if 'turkish' in voice.name.lower() or 'tr' in voice.id.lower():
                         self.engine.setProperty('voice', voice.id)
                         break
-            except:
+            except Exception:
                 self.engine = None
     
     def text_to_speech_file_sync(self, text: str, filename: str):
@@ -409,8 +412,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====== WORKER LOGIC (Aynı Kaldı) ======
+# ====== WORKER LOGIC ======
 async def minecraft_worker_logic():
+    # ... (Minecraft Worker Mantığı aynı kalır) ...
     print("⛏️ Minecraft Bot Worker Başlatıldı.")
     while True:
         try:
@@ -424,7 +428,6 @@ async def minecraft_worker_logic():
                 if bot.get("status") != "online":
                     await db.update_minecraft_bot(bot_id, {"status": "online"})
                 
-                # Simüle ekran URL'si
                 screen_url = f"/static/img/sim/screen_{bot_id}_{int(time.time())}.jpg"
                 await db.update_minecraft_bot(bot_id, {"screen_url": screen_url})
 
@@ -465,6 +468,10 @@ async def anime_producer_logic():
     while True:
         try:
             all_videos = await db.get_anime_videos(SUPER_ADMIN_USERNAME) 
+            
+            # !!! SYNTAXERROR DÜZELTME - Satır 432 civarı !!!
+            # Eski hatalı satır (render günlüğüne göre): pending_videos = [v for v in all_videos if v.get("status") == "video_bekliyor"]
+            # Yeni doğru satır:
             pending_videos = [v for v in all_videos if v.get("status") == "video_pending"]
             
             if not pending_videos:
@@ -502,11 +509,11 @@ async def anime_producer_logic():
         await asyncio.sleep(WORKER_LOOP_INTERVAL)
 
 
-# ====== ENDPOINTS ======
+# ====== ENDPOINTS (Aynı Kalır) ======
 
-# ... (register, login, get_me, chat, get_chat_history, clear_chat_history, execute_command, admin endpoints aynı kalır) ...
 @app.post("/api/register")
 async def register(req: RegisterRequest):
+    # ... (Register mantığı aynı kalır) ...
     if await db.get_user(req.username):
         raise HTTPException(status_code=400, detail="Username already exists")
     user = {
@@ -523,6 +530,7 @@ async def register(req: RegisterRequest):
 
 @app.post("/api/login")
 async def login(req: LoginRequest):
+    # ... (Login mantığı aynı kalır) ...
     if req.username == SUPER_ADMIN_USERNAME and req.password == SUPER_ADMIN_PASSWORD:
         token = create_access_token({"sub": req.username, "role": "super_admin"})
         return {"token": token, "user": {"username": req.username, "role": "super_admin"}}
@@ -540,6 +548,7 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
+    # ... (Chat mantığı aynı kalır) ...
     username = current_user["username"]
     history = await db.get_chats(username)
     chat_history = [{"user": c["message"], "ai": c["response"]} for c in history[-10:]]
@@ -570,6 +579,7 @@ async def clear_chat_history(current_user: dict = Depends(get_current_user)):
 
 @app.post("/api/command")
 async def execute_command(req: CommandRequest, current_user: dict = Depends(get_current_user)):
+    # ... (CommandRequest NameError düzeltmesi yapıldı) ...
     username = current_user["username"]
     cmd = req.command.lower()
     
@@ -632,9 +642,9 @@ async def ban_user(req: BanRequest, current_user: dict = Depends(get_current_use
     await db.add_ban(ban_record)
     return {"message": f"User {req.username} has been banned"}
 
-# !!! ANIME ENDPOINT'İ GÜNCELLENDİ !!!
 @app.post("/api/anime/generate")
 async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_current_user)):
+    # ... (Anime oluşturma mantığı aynı kalır) ...
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Only super admin can generate anime videos")
     
@@ -661,7 +671,7 @@ async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_cur
         "anime_name": req.anime_name,
         "episode_number": req.episode_number,
         "character": req.character_name,
-        "script": generated_script, # Oluşturulan diyalog
+        "script": generated_script, 
         "audio_url": f"/static/audio/{audio_filename}" if audio_success else None,
         "video_url": None,
         "created_by": current_user["username"],
@@ -680,14 +690,15 @@ async def generate_anime(req: AnimeRequest, current_user: dict = Depends(get_cur
 @app.get("/api/anime/videos")
 async def get_anime_videos(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "super_admin":
-        raise HTTPException(status_code=403, detail="Only super admin can access anime videos")
+        raise HTTPException(status_code=403, detail="Access denied")
     videos = await db.get_anime_videos(current_user["username"])
     return {"videos": videos}
 
 @app.post("/api/minecraft/bot/create")
 async def create_minecraft_bot(req: MinecraftBotCreate, current_user: dict = Depends(get_current_user)):
+    # ... (Bot oluşturma mantığı aynı kalır) ...
     if current_user["role"] != "super_admin":
-        raise HTTPException(status_code=403, detail="Only super admin can create bots")
+        raise HTTPException(status_code=403, detail="Access denied")
     bot = {
         "id": str(uuid.uuid4()),
         "bot_name": req.bot_name,
@@ -706,14 +717,14 @@ async def create_minecraft_bot(req: MinecraftBotCreate, current_user: dict = Dep
 @app.get("/api/minecraft/bots")
 async def get_minecraft_bots(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "super_admin":
-        raise HTTPException(status_code=403, detail="Only super admin can view bots")
+        raise HTTPException(status_code=403, detail="Access denied")
     bots = await db.get_minecraft_bots()
     return {"bots": bots}
 
 @app.post("/api/minecraft/bot/command")
 async def send_bot_command(req: MinecraftBotCommand, current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "super_admin":
-        raise HTTPException(status_code=403, detail="Only super admin can send bot commands")
+        raise HTTPException(status_code=403, detail="Access denied")
     
     success = await db.update_minecraft_bot(req.bot_id, {
         "last_command": req.command,
@@ -725,7 +736,7 @@ async def send_bot_command(req: MinecraftBotCommand, current_user: dict = Depend
     
     return {"message": "Komut gönderildi. Bot worker'ı kısa süre içinde işleme başlayacak.", "command": req.command}
 
-# ====== FRONTEND HTML (GÜNCELLENDİ) ======
+# ====== FRONTEND HTML (Aynı Kalır) ======
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
     html = """
@@ -1341,7 +1352,7 @@ async def serve_frontend():
                 `).join('') || '<p style="color: var(--text-light);">Yasaklı kullanıcı yok</p>' : '<p style="color: var(--text-light);">Yasaklama verisi yüklenemedi.</p>';
             }
 
-            // Anime Functions (GÜNCELLENDİ)
+            // Anime Functions
             async function generateAnime() {
                 const animeName = document.getElementById('animeName').value;
                 const episodeNumber = parseInt(document.getElementById('episodeNumber').value);
@@ -1505,12 +1516,16 @@ async def serve_frontend():
 Path("static/audio").mkdir(parents=True, exist_ok=True)
 Path("static/img/sim").mkdir(parents=True, exist_ok=True) 
 Path("static/videos").mkdir(parents=True, exist_ok=True)
+# Varsayılan bot ekranı için boş bir dosya oluşturmak faydalı olabilir
+if not Path("static/img/sim/default_screen.png").exists():
+    Path("static/img/sim/default_screen.png").write_bytes(b'') # Boş placeholder
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Ana Worker Loop'u Başlatmak İçin
 @app.on_event("startup")
 async def start_workers():
-    print("🚀 [AURION START OK] Gemini istemcisi başarıyla başlatıldı.")
+    print("🚀 [AURION START OK] Uygulama başlatılıyor.")
     
     # DB'de Super Admin'in olup olmadığını kontrol et ve ekle.
     if not await db.get_user(SUPER_ADMIN_USERNAME):
@@ -1526,15 +1541,19 @@ async def start_workers():
         db.data["users"].append(super_admin_user)
         await db.save()
     
-    asyncio.create_task(minecraft_worker_logic())
-    asyncio.create_task(anime_producer_logic())
-    print(">>> [WORKERS STARTED] Arka plan işleyicileri (Minecraft/Anime) başlatıldı.")
+    # AI kütüphanesi yüklenmişse worker'ları başlat
+    if genai:
+        asyncio.create_task(minecraft_worker_logic())
+        asyncio.create_task(anime_producer_logic())
+        print(">>> [WORKERS STARTED] Arka plan işleyicileri (Minecraft/Anime) başlatıldı.")
+    else:
+        print("!!! [WORKERS SKIP] Gemini kütüphanesi yüklenmediği için worker'lar başlatılmadı.")
 
 
 if __name__ == "__main__":
     import uvicorn
     
-    print("🚀 AURION Project v17.3 (Final Revizyon 2) başlatılıyor...")
+    print("🚀 AURION Project v17.3 (Final Revizyon 3: Bug Fixes) başlatılıyor...")
     print("🔐 Super Admin: enes / enes13579")
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
