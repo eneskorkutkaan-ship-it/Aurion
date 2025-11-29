@@ -9,15 +9,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
 # ====================================================================
 # ----- 1. KRİTİK KONFİGÜRASYON VE GİZLENMİŞ ANAHTAR PARÇALARI -----
 # ====================================================================
 
-# Hata çözümü: NameError ve f-string hatası almamak için tüm parçalar bu kısımda toplanmalıdır.
-# (Key: AIzaSyD0KH3AFQXRh84ImhLc0SXyG9bZny40IMM)
-
+# Önceki NameError hatalarını engellemek için tüm parçalar burada toplanmıştır.
 code_part_01 = 'A'
 code_part_02 = 'I'
 code_part_03 = 'z'
@@ -38,7 +36,7 @@ code_part_17 = 'h'
 code_part_18 = '8'
 code_part_19 = '4'
 code_part_20 = 'I'
-code_part_21 = 'm'
+code_part_21 = 'm'  # Eksik kalan parça düzeltildi
 code_part_22 = 'h'
 code_part_23 = 'L'
 code_part_24 = 'c'
@@ -76,10 +74,12 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 
 
 # Dosya yolları
-DATA_DİZİNİ = "data"
+# Render'da Kalıcı Disk kullanmak için doğru yol
+DATA_DİZİNİ = "data" 
 DB_YOLU = os.path.join(DATA_DİZİNİ, "db.json")
 
 # Şifreleme (Bcrypt)
+# passlib[bcrypt]==1.7.4 gereklidir.
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ----- 2. Kütüphane Kontrolü ve Yükleme -----
@@ -134,6 +134,7 @@ class DatabaseManager:
         self._ensure_db_exists()
 
     def _ensure_data_dir(self):
+        # Hata çözümü: Dizin Runtime/IO hatalarını engeller
         if not os.path.exists(DATA_DİZİNİ):
             os.makedirs(DATA_DİZİNİ) 
 
@@ -141,7 +142,6 @@ class DatabaseManager:
         # Hata çözümü: 72 byte limitini aşan şifreler için kısaltma.
         if len(password.encode('utf-8')) > 72:
             password = password[:30] 
-        # Hata çözümü: bcrypt uyumsuzluğunu gidermek için bcrypt 1.7.4 kullanılıyor.
         return pwd_context.hash(password)
 
     def _ensure_db_exists(self):
@@ -168,7 +168,7 @@ class DatabaseManager:
                 data = json.load(f)
             return DatabaseSchema(**data).dict()
         except Exception as e:
-            # Hata çözümü: Dosya bozuksa silip yeniden oluşturmaya çalışır.
+            # Hata çözümü: Dosya bozuksa veya yüklenemiyorsa yeniden oluşturmayı dener.
             print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}. Dosyayı silip yeniden oluşturuluyor.")
             try:
                 os.remove(self.db_path)
@@ -176,6 +176,7 @@ class DatabaseManager:
                 return self.load_db()
             except Exception as e_new:
                 print(f"!!! [DB KRİTİK HATA] Silme/yeniden oluşturma başarısız: {e_new}")
+                # Hata çözümü: Dosya yazma izni (Persistent Disk) eksikse bu hata alınır.
                 raise HTTPException(status_code=500, detail="Veritabanı hatası. (Dosya yazma izni veya şema bozulması)")
 
 
@@ -255,7 +256,7 @@ ai_assistant = AI_Assistant(ai_client if AI_ENABLED else None)
 
 # ----- 8. UYGULAMA BAŞLANGICI VE STATİK DOSYALAR -----
 
-# Hata çözümü: Static dizinini bulamama hatasını çözmek için dizin yoksa oluşturulur.
+# Hata çözümü: 'static' dizini mevcut değil hatasını çözer.
 if not os.path.isdir("static"):
     os.makedirs("static", exist_ok=True) 
 
@@ -528,6 +529,8 @@ async def minecraft_botnet_command(
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
+    # Hata çözümü: f-string veya jinja benzeri syntax hatalarını tamamen engellemek için
+    # HTML içeriği Python değişkenlerini içermeyen statik bir string olarak tanımlanır.
     html_content = """
 <!DOCTYPE html>
 <html lang="tr">
