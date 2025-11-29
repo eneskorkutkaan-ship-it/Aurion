@@ -108,23 +108,26 @@ class DatabaseManager:
                 data = json.load(f)
             return DatabaseSchema(**data).dict()
         except Exception as e:
-            print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}")
+            # Bozuk dosyayı silip yeniden oluşturmayı dene. Bu, 500 hatasını çözmelidir.
+            print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}. Dosyayı silip yeniden oluşturuluyor.")
             try:
                 os.remove(self.db_path)
                 self._ensure_db_exists()
                 return self.load_db()
-            except Exception:
-                raise HTTPException(status_code=500, detail="Veritabanı hatası.")
+            except Exception as e_new:
+                print(f"!!! [DB KRİTİK HATA] Silme/yeniden oluşturma başarısız: {e_new}")
+                raise HTTPException(status_code=500, detail="Veritabanı hatası. (Dosya erişimi/şema bozulması)")
 
 
     def save_db(self, data: dict):
         try:
+            # Şema doğrulaması
             DatabaseSchema(**data) 
             with open(self.db_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"!!! [DB HATA] Veri kaydetme hatası: {e}")
-            raise HTTPException(status_code=500, detail="Veri kaydetme hatası.")
+            raise HTTPException(status_code=500, detail="Veri kaydetme hatası. (Dosya yazma izni veya şema bozulması)")
 
 db_manager = DatabaseManager(DB_YOLU)
 
@@ -223,7 +226,7 @@ async def login(username: str = Form(...), password: str = Form(...)):
     
     response = RedirectResponse(url="/", status_code=302)
     # Çerezleri ayarla
-    response.set_cookie(key="access_token", value=access_token, httponly=True)
+    response.set_cookie(key="access_token", value=access_token, httpy_only=True)
     response.set_cookie(key="user_name", value=user_record["username"], httponly=False)
     response.set_cookie(key="user_role", value=user_record["role"], httponly=False)
     return response
@@ -345,7 +348,7 @@ async def admin_get_chat_history(username: str, current_user: dict = Depends(get
 
 
 @app.post("/api/admin/user_action")
-async def user_action(action: str = Form(...), username: str = Form(...), current_user: dict = Depends(get_current_user)):
+async def user_action(action: str = Form(...), username: str = Form(...), password: Optional[str] = Form(None), role: Optional[str] = Form("user"), current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
@@ -353,8 +356,29 @@ async def user_action(action: str = Form(...), username: str = Form(...), curren
     user_index, user_record = next(((i, u) for i, u in enumerate(db["users"]) if u["username"] == username), (None, None))
     
     if action == "add":
-        # HESAP AÇMA İSTEĞİ ÜZERİNE KALDIRILDI
-        raise HTTPException(status_code=403, detail="Kullanıcı oluşturma yetkisi kaldırılmıştır.")
+        # HESAP EKLEME ÖZELLİĞİ (SADECE ADMIN VE USER)
+        if not password:
+             raise HTTPException(status_code=400, detail="Şifre gerekli.")
+
+        # Super Admin eklenmesini engelle
+        if role not in ["admin", "user"]: 
+             raise HTTPException(status_code=400, detail="Geçersiz rol. 'admin' veya 'user' seçin.")
+        
+        if any(u["username"] == username for u in db["users"]):
+             raise HTTPException(status_code=400, detail="Bu kullanıcı adı zaten mevcut.")
+
+        hashed_password = db_manager._hash_password(password)
+        new_user = User(
+            id=str(uuid.uuid4()), 
+            username=username, 
+            password=hashed_password, 
+            role=role, 
+            chat_history=[],
+            is_banned=False
+        )
+        db["users"].append(new_user.dict())
+        db_manager.save_db(db)
+        return {"status": "success", "message": f"Kullanıcı '{username}' ({role}) başarıyla eklendi."}
 
     elif action in ["ban", "unban"]:
         if username == current_user["username"]: 
@@ -765,6 +789,22 @@ async def serve_dashboard(request: Request):
             <div id="admin" class="tab-content">
                 <h2 class="tab-title">Kullanıcı Yönetimi (Super Admin)</h2>
                 
+                <div class="admin-section" id="addUserFormContainer">
+                    <h3>Yeni Kullanıcı Ekle (Admin veya User)</h3>
+                    <form id="addUserForm" class="admin-form">
+                        <div class="input-group">
+                            <input type="text" name="username" placeholder="Kullanıcı Adı" required>
+                            <input type="password" name="password" placeholder="Şifre" required>
+                            <select name="role">
+                                <option value="user">User (Kullanıcı)</option>
+                                <option value="admin">Admin (Yönetici)</option>
+                                </select>
+                            <input type="hidden" name="action" value="add">
+                            <button type="submit" style="background-color: #28a745;">Ekle</button>
+                        </div>
+                    </form>
+                </div>
+                
                 <div class="admin-section">
                     <h3>Mevcut Kullanıcılar (Yönetim, Ban ve Sohbet)</h3>
                     <ul id="userList">
@@ -1125,9 +1165,44 @@ async def serve_dashboard(request: Request):
                 });
             });
         }
+        
+        // Yeni Kullanıcı Ekleme Formu İşlemi
+        document.getElementById('addUserForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const formData = new FormData(form);
+            const adminMsg = document.getElementById('adminMessage');
+            
+            // Şifre boş kontrolü
+            if (!formData.get('password')) {
+                adminMsg.textContent = 'Hata: Şifre alanı boş bırakılamaz.';
+                adminMsg.style.color = '#dc3545';
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/admin/user_action', {
+                    method: 'POST',
+                    body: new URLSearchParams(formData)
+                });
+                
+                const result = await response.json();
+                adminMsg.textContent = result.message || result.detail;
+                adminMsg.style.color = response.ok ? 'yellow' : '#dc3545';
+
+                if (response.ok) {
+                    form.reset(); 
+                    loadUserList(); // Listeyi yenile
+                }
+            } catch (error) {
+                adminMsg.textContent = 'Bağlantı hatası: Yeni kullanıcı eklenemedi.';
+                adminMsg.style.color = '#dc3545';
+                console.error('Kullanıcı ekleme hatası:', error);
+            }
+        });
 
 
-        // YENİ: Ban ve Unban fonksiyonu
+        // Ban ve Unban fonksiyonu
         async function banUser(username, action) {
             const formData = new FormData();
             formData.append('action', action);
@@ -1141,6 +1216,7 @@ async def serve_dashboard(request: Request):
             const result = await response.json();
             const adminMsg = document.getElementById('adminMessage');
             adminMsg.textContent = result.message || result.detail;
+            adminMsg.style.color = response.ok ? 'yellow' : '#dc3545';
 
             if (response.ok) {
                 loadUserList(); // Listeyi yenile
@@ -1149,7 +1225,7 @@ async def serve_dashboard(request: Request):
             }
         }
         
-        // YENİ: Sohbet Geçmişi Görüntüleme fonksiyonu
+        // Sohbet Geçmişi Görüntüleme fonksiyonu
         async function viewUserChat(username) {
             const historyContent = document.getElementById('userChatHistoryContent');
             const usernameDisplay = document.getElementById('chatHistoryUsername');
@@ -1188,13 +1264,6 @@ async def serve_dashboard(request: Request):
             }
         }
 
-        // KULLANICI EKLEME KALDIRILDIĞI İÇİN bu event listener KALDIRILDI.
-        /*
-        document.getElementById('addUserForm').addEventListener('submit', async (e) => {
-            // ... (Kullanıcı ekleme mantığı)
-        });
-        */
-
         async function deleteUser(username) {
             const formData = new FormData();
             formData.append('action', 'delete');
@@ -1206,7 +1275,10 @@ async def serve_dashboard(request: Request):
             });
 
             const result = await response.json();
-            document.getElementById('adminMessage').textContent = result.message || result.detail;
+            const adminMsg = document.getElementById('adminMessage');
+            adminMsg.textContent = result.message || result.detail;
+            adminMsg.style.color = response.ok ? 'yellow' : '#dc3545';
+            
             if (response.ok) {
                 loadUserList();
             } else {
