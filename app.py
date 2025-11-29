@@ -113,8 +113,7 @@ class DatabaseSchema(BaseModel):
 AI_ENABLED = False
 if GEMINI_API_KEY and genai:
     try:
-        # Hata çözümü: genai.Client() yerine genai.configure() kullanıldı.
-        # Bu, en son kütüphane sürümünde doğru yaklaşımdır.
+        # Hata çözümü: genai.configure() ile kütüphane yapılandırılıyor.
         genai.configure(api_key=GEMINI_API_KEY) 
         if genai.Client(): 
              print(">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
@@ -173,7 +172,8 @@ class DatabaseManager:
                 return self.load_db()
             except Exception as e_new:
                 print(f"!!! [DB KRİTİK HATA] Silme/yeniden oluşturma başarısız: {e_new}")
-                raise HTTPException(status_code=500, detail="Veritabanı hatası. (Dosya erişimi/şema bozulması)")
+                # Hata çözümü: Kalıcı disk yoksa bu hata kaçınılmazdır.
+                raise HTTPException(status_code=500, detail="Veritabanı hatası. (Dosya yazma izni veya şema bozulması)")
 
 
     def save_db(self, data: dict):
@@ -183,7 +183,7 @@ class DatabaseManager:
                 json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"!!! [DB HATA] Veri kaydetme hatası: {e}")
-            raise HTTPException(status_code=500, detail="Veri kaydetme hatası. (Dosya yazma izni veya şema bozulması)")
+            raise HTTPException(status_code=500, detail="API Hatası: Veri kaydetme hatası. (Dosya yazma izni veya şema bozulması)")
 
 db_manager = DatabaseManager(DB_YOLU)
 
@@ -422,7 +422,7 @@ async def anime_producer_action(prompt: str = Form(...), current_user: dict = De
     try:
         system_prompt = "Sen bir anime yapımcısısın. Kullanıcının verdiği kısa konuyu alarak, o konuya uygun 300 kelimelik kısa bir anime serisi özeti, ana karakter ismi ve serinin tarzını (Örn: Mecha, Fantazi, Cyberpunk) oluştur."
         
-        # Bu AI çağrısı, Chat API'sine benzer şekilde çalışır ancak tek seferliktir
+        # AI çağrısı
         response = ai_assistant.client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
@@ -434,22 +434,103 @@ async def anime_producer_action(prompt: str = Form(...), current_user: dict = De
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Üretim Hatası: {e}")
 
-@app.post("/api/minecraft/botnet_command")
-async def minecraft_botnet_command(command: str = Form(...), target: str = Form(...), current_user: dict = Depends(get_current_user)):
+@app.post("/api/anime/search_and_dublaj")
+async def anime_search_and_dublaj(
+    action: str = Form(...),
+    anime_name: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user)
+):
     if current_user["role"] not in ["admin", "super_admin"]:
         raise HTTPException(status_code=403, detail="Bu özelliği sadece Admin/Super Admin kullanabilir.")
 
-    # Komut simülasyonu
-    if command == "ping":
-        message = f"Simülasyon: Ping komutu '{target}' hedefine başarıyla gönderildi. Yanıt süresi: 45ms."
-    elif command == "attack":
-        message = f"Simülasyon: DDoS Saldırısı '{target}' hedefine 10.000 Bot ile BAŞLATILDI. Lütfen logları kontrol edin."
-    elif command == "stop":
-        message = "Simülasyon: Devam eden tüm BotNet saldırıları başarıyla DURDURULDU."
-    else:
-        raise HTTPException(status_code=400, detail="Geçersiz botnet komutu.")
+    if action == "search":
+        if not anime_name:
+            raise HTTPException(status_code=400, detail="Anime adı gereklidir.")
+        
+        if not AI_ENABLED:
+            return JSONResponse({
+                "status": "success",
+                "result": f"AI devre dışı. Simülasyon: '{anime_name}' animesi hakkında bilgi motoru devre dışı. AI servisini kontrol edin.",
+                "message": "AI devre dışı."
+            })
 
-    return JSONResponse({"status": "success", "message": message})
+        try:
+            system_prompt = f"Sen anime uzmanı bir AI'sın. '{anime_name}' adlı anime serisi hakkında kısa bir özet (türü, ana karakterleri ve popülerlik nedeni dahil) ve güncel sezon sayısını içeren detaylı ve ilgi çekici bir bilgi metni oluştur."
+            
+            response = ai_assistant.client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=[
+                    {"role": "system", "parts": [{"text": system_prompt}]},
+                    {"role": "user", "parts": [{"text": f"Anime adı: {anime_name}"}]}
+                ]
+            )
+            return JSONResponse({"status": "success", "result": response.text})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"AI Arama Hatası: {e}")
+
+    elif action == "dublaj_link":
+        # YASAL UYARI: Bu bağlantı simüle edilmiştir. Gerçek, telif hakkına sahip içerik barındırılamaz.
+        simulated_link = f"https://aurion-media.net/ozel-stream/{uuid.uuid4()}"
+        
+        return JSONResponse({
+            "status": "success", 
+            "link": simulated_link, 
+            "message": "Bağlantı başarıyla oluşturuldu. (Simülasyon)"
+        })
+
+    return HTTPException(status_code=400, detail="Geçersiz işlem.")
+
+
+@app.post("/api/minecraft/botnet_command")
+async def minecraft_botnet_command(
+    command: str = Form(...), 
+    target: str = Form(...), 
+    botname: str = Form(...), 
+    message: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user["role"] not in ["admin", "super_admin"]:
+        raise HTTPException(status_code=403, detail="Bu özelliği sadece Admin/Super Admin kullanabilir.")
+
+    # Simülasyon, BotNet sunucu bağlantısı yerine geçer.
+    if command == "connect":
+        if not target or not botname:
+            raise HTTPException(status_code=400, detail="Bağlantı için Sunucu IP/Adresi ve Bot Adı gereklidir.")
+        
+        message_result = (
+            f"🟢 BAĞLANTI İSTEĞİ GÖNDERİLDİ:\n"
+            f"Sunucu: {target}\n"
+            f"Bot: {botname}\n"
+            f"Durum: Bot'un sunucuya bağlanma süreci başlatıldı. Botun sunucuda kalması için bu işlemin kalıcı bir arka plan servisi tarafından yürütülmesi gerekir. (Simülasyon)\n"
+            f"Yanıt: Başarıyla başlatıldı. (Gerçek bot bağlantısı için ayrı bir Node.js veya Go servisi gerekir.)"
+        )
+    elif command == "disconnect":
+        message_result = (
+            f"🔴 BAĞLANTI KESME İSTEĞİ:\n"
+            f"Tüm botların {target} sunucusuyla bağlantısı kesildi. (Simülasyon)"
+        )
+    elif command == "say":
+        if not message:
+            raise HTTPException(status_code=400, detail="'Mesaj Gönder' komutu için mesaj içeriği gereklidir.")
+        
+        message_result = (
+            f"💬 CHAT KOMUTU:\n"
+            f"Bot: {botname}\n"
+            f"Sunucu: {target}\n"
+            f"Mesaj: '{message}'\n"
+            f"Durum: Bot, sunucuya başarıyla mesaj gönderdi. (Simülasyon)"
+        )
+    elif command == "status":
+        message_result = (
+            f"🔄 DURUM KONTROLÜ:\n"
+            f"Hedeflenen Sunucu: {target}\n"
+            f"Bot Adı: {botname}\n"
+            f"Durum: Şu anda sunucuda aktif ve gözlem yapıyor. Ping: 55ms. (Simülasyon)"
+        )
+    else:
+        raise HTTPException(status_code=400, detail="Geçersiz BotNet komutu.")
+
+    return JSONResponse({"status": "success", "message": message_result})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -460,17 +541,19 @@ async def home(request: Request):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aurion - Gelişmiş Cevap Motoru</title>
+    <title>AURION | Gelişmiş Operasyon Paneli</title>
     <style>
+        /* Claila.com'a yakın, modern, koyu tema */
         :root {
             --bg-dark: #1e1e2d;
             --bg-light: #27293d;
             --text-light: #e0e0e0;
             --text-muted: #80809b;
-            --primary: #5d5dff;
+            --primary: #8a2be2; /* Mavi-mor (Claila tarzı) */
             --secondary: #ff5d9e;
             --border-color: #3f405c;
             --input-bg: #19192b;
+            --hover-bg: #353852;
         }
         * {
             box-sizing: border-box;
@@ -500,15 +583,16 @@ async def home(request: Request):
         h1 {
             color: var(--primary);
             text-align: center;
-            font-size: 28px;
+            font-size: 32px;
             margin-bottom: 20px;
+            font-weight: 700;
         }
         form {
             display: flex;
             flex-direction: column;
             gap: 15px;
         }
-        input[type="text"], input[type="password"] {
+        input[type="text"], input[type="password"], textarea, select {
             padding: 12px;
             border: 1px solid var(--border-color);
             border-radius: 8px;
@@ -517,7 +601,7 @@ async def home(request: Request):
             font-size: 16px;
             transition: border-color 0.3s;
         }
-        input[type="text"]:focus, input[type="password"]:focus {
+        input:focus, textarea:focus, select:focus {
             border-color: var(--primary);
             outline: none;
         }
@@ -529,11 +613,14 @@ async def home(request: Request):
             color: white;
             font-size: 16px;
             cursor: pointer;
-            transition: background-color 0.3s;
+            transition: background-color 0.3s, transform 0.1s;
         }
         button:hover {
-            background-color: #4b4bd8;
+            background-color: #7b24d0;
+            transform: translateY(-1px);
         }
+        
+        /* DASHBOARD STİLİ */
         #dashboard {
             max-width: 1200px;
             height: 90vh;
@@ -556,8 +643,9 @@ async def home(request: Request):
             padding: 0 20px 20px;
             font-size: 24px;
             font-weight: bold;
-            color: var(--secondary);
+            color: var(--primary); 
             text-align: center;
+            border-bottom: 2px solid var(--primary);
         }
         .nav-link {
             padding: 12px 20px;
@@ -569,19 +657,26 @@ async def home(request: Request):
             color: var(--text-muted);
             font-size: 16px;
         }
-        .nav-link:hover, .nav-link.active {
-            background-color: var(--border-color);
+        .nav-link:hover {
+            background-color: var(--hover-bg);
             color: var(--text-light);
         }
+        .nav-link.active {
+            background-color: var(--primary);
+            color: white;
+            font-weight: bold;
+        }
+        .nav-link.active:hover {
+            background-color: var(--primary);
+        }
+
         #userInfo {
-            padding: 10px 20px;
+            padding: 15px 20px;
             border-top: 1px solid var(--border-color);
             margin-top: auto;
             display: flex;
-            justify-content: space-between;
-            align-items: center;
-            color: var(--text-muted);
-            font-size: 14px;
+            flex-direction: column;
+            gap: 10px;
         }
         #logoutButton {
             background-color: #dc3545;
@@ -592,10 +687,11 @@ async def home(request: Request):
             background-color: #c82333;
         }
         #content {
-            padding: 20px;
+            padding: 30px;
             display: flex;
             flex-direction: column;
             overflow-y: auto;
+            background-color: var(--bg-dark);
         }
         .tab-content {
             display: none;
@@ -605,33 +701,44 @@ async def home(request: Request):
         .tab-content.active {
             display: flex;
         }
+        .tab-title {
+            font-size: 28px;
+            margin-bottom: 25px;
+            color: var(--text-light);
+            border-left: 5px solid var(--primary);
+            padding-left: 15px;
+        }
+        
+        /* CHAT STİLİ */
         #chatContent {
             flex-grow: 1;
             overflow-y: auto;
             padding: 10px;
-            border-bottom: 1px solid var(--border-color);
             margin-bottom: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
         }
         .message {
-            margin-bottom: 15px;
             max-width: 80%;
-            padding: 10px 15px;
+            padding: 12px 18px;
             border-radius: 18px;
             line-height: 1.5;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
         }
         .user-message {
             background-color: var(--primary);
             color: white;
             align-self: flex-end;
             margin-left: auto;
-            border-bottom-right-radius: 2px;
+            border-bottom-right-radius: 4px;
         }
         .ai-message {
             background-color: var(--bg-light);
             color: var(--text-light);
             align-self: flex-start;
             border: 1px solid var(--border-color);
-            border-bottom-left-radius: 2px;
+            border-bottom-left-radius: 4px;
         }
         #chatForm {
             display: flex;
@@ -640,30 +747,28 @@ async def home(request: Request):
         }
         #chatInput {
             flex-grow: 1;
-            padding: 12px;
-            border-radius: 25px;
+            padding: 15px;
+            border-radius: 30px;
             background-color: var(--input-bg);
             border: 1px solid var(--border-color);
             color: var(--text-light);
         }
         #chatSendBtn {
             width: 100px;
-            border-radius: 25px;
+            border-radius: 30px;
             background-color: var(--secondary);
         }
         #chatSendBtn:hover {
             background-color: #e04a85;
         }
-        .tab-title {
-            font-size: 24px;
-            margin-bottom: 20px;
-            color: var(--primary);
-        }
+
+        /* ADMIN VE ÖZEL BÖLÜM STİLLERİ */
         .admin-section {
             margin-bottom: 30px;
             padding: 20px;
             background-color: var(--bg-light);
-            border-radius: 8px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
         }
         .admin-section h3 {
             color: var(--secondary);
@@ -673,19 +778,17 @@ async def home(request: Request):
         }
         .admin-form {
             display: flex;
+            flex-wrap: wrap;
             gap: 10px;
             align-items: center;
         }
-        .admin-form input, .admin-form select {
-            padding: 10px;
-            border-radius: 6px;
-            border: 1px solid var(--border-color);
-            background-color: var(--input-bg);
-            color: var(--text-light);
+        .input-group {
+            display: flex;
+            gap: 10px;
+            width: 100%;
         }
-        .admin-form button {
-            padding: 10px 15px;
-            white-space: nowrap;
+        .input-group input, .input-group select {
+            flex-grow: 1;
         }
         #userList {
             list-style: none;
@@ -696,45 +799,36 @@ async def home(request: Request):
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 10px 0;
+            padding: 12px 0;
             border-bottom: 1px dashed var(--border-color);
         }
-        #userList li:last-child {
-            border-bottom: none;
-        }
-        .delete-btn {
-            background-color: #dc3545;
-            padding: 5px 10px;
-            margin-left: 5px;
-        }
-        .delete-btn:hover {
-            background-color: #c82333;
-        }
-        .ban-btn, .view-chat-btn {
+        .delete-btn { background-color: #dc3545; }
+        .ban-btn { background-color: #ffc107; }
+        .unban-btn { background-color: #28a745; }
+        .view-chat-btn { background-color: #5bc0de; }
+        .delete-btn, .ban-btn, .unban-btn, .view-chat-btn {
             padding: 5px 10px;
             margin-left: 5px;
             font-size: 14px;
-        }
-        .input-group {
-            display: flex;
-            gap: 10px;
-            width: 100%;
-        }
-        .input-group input {
-            flex-grow: 1;
+            border-radius: 6px;
         }
         .chat-admin-message {
-            margin-bottom: 10px;
-            padding: 5px;
-            border-radius: 4px;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 8px;
             font-size: 14px;
         }
-
+        
+        /* Minecraft ve Anime Yanıt Alanı */
+        #animeSearchResult, #minecraftBotnetResult, #animeProducerResult {
+             min-height: 100px;
+             white-space: pre-wrap;
+        }
 
         @media (max-width: 768px) {
             #dashboard {
                 grid-template-columns: 1fr;
-                grid-template-rows: 60px 1fr;
+                grid-template-rows: auto 1fr;
                 height: 100vh;
                 max-width: none;
             }
@@ -744,13 +838,14 @@ async def home(request: Request):
                 align-items: center;
                 border-right: none;
                 border-bottom: 1px solid var(--border-color);
-                padding: 0;
+                padding: 10px 0;
+                overflow-x: auto;
             }
             .menu-header, #userInfo {
                 display: none;
             }
             .nav-link {
-                padding: 10px;
+                padding: 8px 10px;
                 gap: 5px;
                 flex-direction: column;
                 font-size: 12px;
@@ -760,17 +855,14 @@ async def home(request: Request):
                 display: none;
             }
             #content {
-                padding: 10px;
+                padding: 15px;
             }
-            .admin-form {
+            .admin-form, .input-group {
                 flex-direction: column;
                 align-items: stretch;
             }
             .admin-form button {
                 width: 100%;
-            }
-            .input-group {
-                flex-direction: column;
             }
         }
     </style>
@@ -778,9 +870,9 @@ async def home(request: Request):
 <body>
 
     <section id="authSection">
-        <h1 style="color:var(--secondary);">AURION</h1>
+        <h1 style="color:var(--primary);">AURION V1</h1>
         <form id="loginForm">
-            <h2 style="color:var(--text-light); text-align:center;">Giriş</h2> 
+            <h2 style="color:var(--text-light); text-align:center; font-size: 22px;">Operasyon Girişi</h2> 
             <input type="text" id="username" name="username" placeholder="Kullanıcı Adı" required>
             <input type="password" id="password" name="password" placeholder="Şifre" required>
             <button type="submit">Giriş Yap</button>
@@ -792,24 +884,27 @@ async def home(request: Request):
             <div class="menu-header">AURION</div>
             
             <a class="nav-link active" data-tab="chat" onclick="switchTab('chat')">
-                <span class="icon">💬</span> <span>Chat & AI</span>
+                <span class="icon">💬</span> <span>AI Chatbot</span>
             </a>
             
             <a class="nav-link" data-tab="admin" onclick="switchTab('admin')">
-                <span class="icon">👥</span> <span>Admin Panel (Users)</span>
+                <span class="icon">👥</span> <span>Admin Panel</span>
             </a>
 
             <a class="nav-link" data-tab="anime" onclick="switchTab('anime')">
-                <span class="icon">🎬</span> <span>Anime Producer</span>
+                <span class="icon">🎬</span> <span>Anime Center</span>
             </a>
 
             <a class="nav-link" data-tab="minecraft" onclick="switchTab('minecraft')">
-                <span class="icon">🤖</span> <span>Minecraft BotNet</span>
+                <span class="icon">🤖</span> <span>MC Command</span>
             </a>
             
             <div id="userInfo">
-                <div>
-                    <span id="currentUsername"></span> (<span id="currentUserRole"></span>)
+                <div style="font-weight: bold; color: var(--text-light);">
+                    Kullanıcı: <span id="currentUsername"></span>
+                </div>
+                <div style="font-size: 14px; color: var(--secondary);">
+                    Rol: <span id="currentUserRole"></span>
                 </div>
                 <button id="logoutButton" onclick="logout()">Çıkış</button>
             </div>
@@ -822,7 +917,7 @@ async def home(request: Request):
                 <div id="chatContent">
                     </div>
                 <form id="chatForm">
-                    <input type="text" id="chatInput" name="message" placeholder="Ask Aurion or Type / for commands" required>
+                    <input type="text" id="chatInput" name="message" placeholder="Aurion'a bir soru sor veya komut gir..." required>
                     <button type="submit" id="chatSendBtn">Gönder</button>
                 </form>
             </div>
@@ -831,23 +926,23 @@ async def home(request: Request):
                 <h2 class="tab-title">Kullanıcı Yönetimi (Super Admin)</h2>
                 
                 <div class="admin-section" id="addUserFormContainer">
-                    <h3>Yeni Kullanıcı Ekle (Admin veya User)</h3>
+                    <h3>Yeni Kullanıcı Ekle</h3>
                     <form id="addUserForm" class="admin-form">
                         <div class="input-group">
                             <input type="text" name="username" placeholder="Kullanıcı Adı" required>
                             <input type="password" name="password" placeholder="Şifre" required>
-                            <select name="role">
-                                <option value="user">User (Kullanıcı)</option>
-                                <option value="admin">Admin (Yönetici)</option>
-                                </select>
+                            <select name="role" style="width: 150px;">
+                                <option value="user">User</option>
+                                <option value="admin">Admin</option>
+                            </select>
                             <input type="hidden" name="action" value="add">
-                            <button type="submit" style="background-color: #28a745;">Ekle</button>
+                            <button type="submit" style="background-color: #28a745;">Kullanıcı Ekle</button>
                         </div>
                     </form>
                 </div>
                 
                 <div class="admin-section">
-                    <h3>Mevcut Kullanıcılar (Yönetim, Ban ve Sohbet)</h3>
+                    <h3>Mevcut Kullanıcılar (Yönetim, Ban, Sohbet)</h3>
                     <ul id="userList">
                         </ul>
                 </div>
@@ -855,7 +950,7 @@ async def home(request: Request):
                 <div class="admin-section" id="chatHistorySection">
                     <h3>Sohbet Geçmişi Görüntüleme: <span id="chatHistoryUsername" style="color: var(--primary);"></span></h3>
                     <div id="userChatHistoryContent" style="height: 300px; overflow-y: scroll; background-color: var(--input-bg); padding: 10px; border-radius: 6px;">
-                        Lütfen yukarıdaki listeden bir kullanıcının "Sohbeti Gör" butonuna tıklayın.
+                        Lütfen listeden bir kullanıcının "Sohbeti Gör" butonuna tıklayın.
                     </div>
                 </div>
                 
@@ -863,40 +958,63 @@ async def home(request: Request):
             </div>
             
             <div id="anime" class="tab-content">
-                <h2 class="tab-title">Anime Producer (AI İçerik Üretimi)</h2>
+                <h2 class="tab-title">Anime Center (Bilgi ve Yapım)</h2>
+                
                 <div class="admin-section">
-                    <h3>Yeni İçerik Üret</h3>
+                    <h3>Anime Arama ve Dublaj Kaynağı Bulma</h3>
+                    <form id="animeSearchForm" class="admin-form">
+                        <div class="input-group">
+                            <input type="text" name="anime_name" placeholder="Aramak istediğiniz anime ismi (örn: One Piece)" required>
+                            <button type="submit" style="background-color: #5bc0de;">Anime Bilgisi Ara</button>
+                        </div>
+                    </form>
+                    
+                    <div id="dublajLinkContainer" style="margin-top: 15px; display: none;">
+                        <button id="requestDublajLinkBtn" style="background-color: #28a745; width: 100%;">Tüm Sezon Dublaj Bağlantısını Oluştur</button>
+                        <p id="dublajLinkResult" style="margin-top: 10px; color: yellow;"></p>
+                    </div>
+                </div>
+
+                <div class="admin-section">
+                    <h3>AI Bilgi Motoru Yanıtı</h3>
+                    <div id="animeSearchResult" style="white-space: pre-wrap; color: var(--text-light); background-color: var(--input-bg); padding: 15px; border-radius: 6px;">Henüz bir arama yapılmadı.</div>
+                </div>
+                
+                <div class="admin-section" id="producerSection">
+                    <h3>Yeni Anime Konsepti Üret (Producer)</h3>
                     <form id="animeProducerForm" class="admin-form">
                         <textarea id="animePrompt" name="prompt" placeholder="Üretmek istediğiniz anime konusu, karakteri veya görsel detaylarını girin (Max 500 karakter)" style="width: 100%; height: 100px; padding: 10px; border-radius: 6px; background-color: var(--input-bg); color: var(--text-light);" maxlength="500"></textarea>
                         <input type="hidden" name="action" value="generate">
-                        <button type="submit">AI ile Anime Üret</button>
+                        <button type="submit">AI ile Konsept Üret</button>
                     </form>
-                </div>
-                <div class="admin-section">
-                    <h3>Üretim Sonucu</h3>
-                    <div id="animeProducerResult" style="white-space: pre-wrap; color: var(--text-light); background-color: var(--input-bg); padding: 15px; border-radius: 6px;">Henüz bir üretim yapılmadı.</div>
+                    <div id="animeProducerResult" style="white-space: pre-wrap; margin-top: 15px; color: var(--text-light); background-color: var(--input-bg); padding: 15px; border-radius: 6px;">Konsept üretimi bekleniyor.</div>
                 </div>
             </div>
 
             <div id="minecraft" class="tab-content">
-                <h2 class="tab-title">Minecraft BotNet Kontrolü</h2>
+                <h2 class="tab-title">Minecraft Komuta Merkezi (Bot Simülasyonu)</h2>
                 <div class="admin-section">
-                    <h3>Komut Gönder</h3>
+                    <h3>Komut ve Bağlantı Bilgileri</h3>
                     <form id="minecraftBotnetForm" class="admin-form">
+                        <div class="input-group" style="margin-bottom: 10px;">
+                            <input type="text" name="target" placeholder="Hedef Sunucu IP / Bağlantı Adresi (örn: mc.sunucu.com)" required>
+                            <input type="text" name="botname" placeholder="Bot Adı (Sunucuda görünecek isim)" required>
+                        </div>
                         <div class="input-group">
                             <select name="command" style="width: 150px;">
-                                <option value="ping">Ping Sunucusu</option>
-                                <option value="attack">Saldırı Başlat (DDoS)</option>
-                                <option value="stop">Saldırıyı Durdur</option>
+                                <option value="connect">Sunucuya Bağlan</option>
+                                <option value="disconnect">Bağlantıyı Kes</option>
+                                <option value="say">Mesaj Gönder (Chat)</option>
+                                <option value="status">Bot Durumu Kontrolü</option>
                             </select>
-                            <input type="text" name="target" placeholder="Hedef IP veya Alan Adı (örn: 127.0.0.1)" required>
+                            <input type="text" name="message" id="minecraftMessage" placeholder="Eğer 'say' seçiliyse buraya mesajı yazın..." style="flex-grow: 1;">
+                            <button type="submit">Komutu Uygula</button>
                         </div>
-                        <button type="submit">Komutu Uygula</button>
                     </form>
                 </div>
                  <div class="admin-section">
-                    <h3>Komut Sonucu</h3>
-                    <div id="minecraftBotnetResult" style="color: var(--text-light); background-color: var(--input-bg); padding: 15px; border-radius: 6px;">Henüz bir komut gönderilmedi.</div>
+                    <h3>Bot/Sunucu Yanıtı (Simülasyon)</h3>
+                    <div id="minecraftBotnetResult" style="color: var(--text-light); white-space: pre-wrap; background-color: var(--input-bg); padding: 15px; border-radius: 6px;">Henüz bir komut gönderilmedi.</div>
                 </div>
             </div>
         </div>
@@ -944,7 +1062,8 @@ async def home(request: Request):
             adminTabs.forEach(tab => {
                 const link = document.querySelector(`.nav-link[data-tab="${tab}"]`);
                 if (link) {
-                    if (userRole !== 'super_admin') {
+                    // Admin ve Super Admin görebilir.
+                    if (userRole === 'user') {
                         link.style.display = 'none';
                     } else {
                         link.style.display = 'flex';
@@ -1123,7 +1242,7 @@ async def home(request: Request):
             
             // Sohbet geçmişi alanını sıfırla
             document.getElementById('chatHistoryUsername').textContent = '';
-            document.getElementById('userChatHistoryContent').innerHTML = 'Lütfen yukarıdaki listeden bir kullanıcının "Sohbeti Gör" butonuna tıklayın.';
+            document.getElementById('userChatHistoryContent').innerHTML = 'Lütfen listeden bir kullanıcının "Sohbeti Gör" butonuna tıklayın.';
 
             try {
                 const response = await fetch('/api/admin/users');
@@ -1147,6 +1266,7 @@ async def home(request: Request):
                     const isBanned = user.is_banned;
                     const banText = isBanned ? 'Yasağı Kaldır' : 'Yasakla';
                     const banAction = isBanned ? 'unban' : 'ban';
+                    const banClass = isBanned ? 'unban-btn' : 'ban-btn';
                     const statusColor = isBanned ? 'color: #ffc107; font-weight: bold;' : 'color: #28a745; font-weight: bold;';
 
                     const li = document.createElement('li');
@@ -1156,8 +1276,8 @@ async def home(request: Request):
                             <span style="${statusColor}">[${isBanned ? 'YASAKLI' : 'AKTİF'}]</span>
                         </span>
                         <div>
-                            <button class="view-chat-btn" data-username="${user.username}" style="background-color: #5bc0de;">Sohbeti Gör</button>
-                            <button class="ban-btn" data-username="${user.username}" data-action="${banAction}" style="background-color: ${isBanned ? '#28a745' : '#ffc107'};">${banText}</button>
+                            <button class="view-chat-btn" data-username="${user.username}">Sohbeti Gör</button>
+                            <button class="${banClass}" data-username="${user.username}" data-action="${banAction}">${banText}</button>
                             <button class="delete-btn" data-username="${user.username}">Sil</button>
                         </div>
                     `;
@@ -1175,7 +1295,7 @@ async def home(request: Request):
         }
         
         function setupAdminEventListeners(userListElement) {
-            userListElement.querySelectorAll('.ban-btn').forEach(button => {
+            userListElement.querySelectorAll('.ban-btn, .unban-btn').forEach(button => {
                 button.addEventListener('click', async (e) => {
                     const username = e.target.getAttribute('data-username');
                     const action = e.target.getAttribute('data-action');
@@ -1214,7 +1334,6 @@ async def home(request: Request):
             const formData = new FormData(form);
             const adminMsg = document.getElementById('adminMessage');
             
-            // Şifre boş kontrolü
             if (!formData.get('password')) {
                 adminMsg.textContent = 'Hata: Şifre alanı boş bırakılamaz.';
                 adminMsg.style.color = '#dc3545';
@@ -1293,7 +1412,7 @@ async def home(request: Request):
                     const isUser = msg.sender === 'user';
                     
                     p.classList.add('chat-admin-message');
-                    p.style.backgroundColor = isUser ? 'rgba(93, 93, 255, 0.2)' : 'rgba(255, 93, 158, 0.1)';
+                    p.style.backgroundColor = isUser ? 'rgba(138, 43, 226, 0.2)' : 'rgba(255, 93, 158, 0.1)';
                     p.innerHTML = `<strong>[${timestamp}] ${isUser ? 'KULLANICI' : 'AURION'}:</strong> ${msg.content}`;
                     historyContent.appendChild(p);
                 });
@@ -1327,7 +1446,84 @@ async def home(request: Request):
             }
         }
         
-        // ----- Anime Producer İşlemleri -----
+        // ----- Anime Arama ve Dublaj Bağlantısı İşlemleri -----
+
+        document.getElementById('animeSearchForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const formData = new FormData(form);
+            const animeName = formData.get('anime_name');
+            formData.append('action', 'search');
+            
+            const resultElement = document.getElementById('animeSearchResult');
+            const linkContainer = document.getElementById('dublajLinkContainer');
+            const linkResult = document.getElementById('dublajLinkResult');
+            
+            resultElement.textContent = `Anime: ${animeName} için AI bilgi arıyor...`;
+            linkContainer.style.display = 'none';
+            linkResult.textContent = '';
+            resultElement.style.color = 'var(--text-light)';
+            
+            try {
+                const response = await fetch('/api/anime/search_and_dublaj', {
+                    method: 'POST',
+                    body: new URLSearchParams(formData)
+                });
+
+                const result = await response.json();
+                
+                if (response.ok && result.status === 'success') {
+                    resultElement.textContent = result.result; 
+                    linkContainer.style.display = 'block';
+                    document.getElementById('requestDublajLinkBtn').setAttribute('data-anime-name', animeName);
+                    linkResult.textContent = `Şimdi '${animeName}' için dublaj bağlantısı oluşturabilirsiniz.`;
+                } else {
+                    resultElement.textContent = 'Hata: ' + (result.message || result.detail || 'Bilinmeyen bir arama hatası oluştu.');
+                    resultElement.style.color = '#dc3545';
+                    linkContainer.style.display = 'none';
+                }
+            } catch (error) {
+                resultElement.textContent = 'Bağlantı hatası: Sunucuya ulaşılamıyor.';
+                resultElement.style.color = '#dc3545';
+            }
+        });
+
+        document.getElementById('requestDublajLinkBtn').addEventListener('click', async (e) => {
+            const animeName = e.target.getAttribute('data-anime-name');
+            const linkResult = document.getElementById('dublajLinkResult');
+            
+            linkResult.textContent = `'${animeName}' için özel dublaj bağlantısı oluşturuluyor...`;
+            linkResult.style.color = 'yellow';
+            
+            try {
+                const formData = new FormData();
+                formData.append('action', 'dublaj_link');
+                
+                const response = await fetch('/api/anime/search_and_dublaj', {
+                    method: 'POST',
+                    body: new URLSearchParams(formData)
+                });
+                
+                const result = await response.json();
+
+                if (response.ok && result.status === 'success') {
+                    linkResult.innerHTML = `
+                        <strong style="color: #28a745;">BAĞLANTI BAŞARILI:</strong> Tüm Sezon/Bölümler (${animeName}):<br>
+                        <a href="${result.link}" target="_blank" style="color: var(--secondary); word-break: break-all;">${result.link}</a>
+                        <br>Lütfen unutmayın: Bu, yasal kısıtlamalar nedeniyle sizin sisteminizin simüle ettiği bir bağlantıdır.
+                    `;
+                } else {
+                    linkResult.textContent = 'Bağlantı oluşturma hatası: ' + (result.message || result.detail);
+                    linkResult.style.color = '#dc3545';
+                }
+                
+            } catch (error) {
+                linkResult.textContent = 'Bağlantı hatası: Sunucuya ulaşılamıyor.';
+                linkResult.style.color = '#dc3545';
+            }
+        });
+        
+        // ----- Anime Producer İşlemleri (Konsept Üretme) -----
         document.getElementById('animeProducerForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const form = e.target;
@@ -1344,7 +1540,7 @@ async def home(request: Request):
                 const result = await response.json();
                 
                 if (response.ok && result.status === 'success') {
-                    resultElement.textContent = result.result; // AI'dan gelen detaylı yanıtı göster
+                    resultElement.textContent = result.result; 
                 } else {
                     resultElement.textContent = 'Hata: ' + (result.message || result.detail || 'Bilinmeyen bir hata oluştu.');
                     resultElement.style.color = '#dc3545';
@@ -1353,8 +1549,9 @@ async def home(request: Request):
                 resultElement.textContent = 'Bağlantı hatası: Sunucuya ulaşılamıyor.';
                 resultElement.style.color = '#dc3545';
             }
-            resultElement.style.backgroundColor = 'var(--bg-light)';
+            resultElement.style.backgroundColor = 'var(--input-bg)';
         });
+
         
         // ----- Minecraft BotNet İşlemleri -----
         document.getElementById('minecraftBotnetForm').addEventListener('submit', async (e) => {
@@ -1373,7 +1570,7 @@ async def home(request: Request):
                 const result = await response.json();
                 
                 if (response.ok && result.status === 'success') {
-                    resultElement.textContent = 'Başarılı: ' + result.message;
+                    resultElement.textContent = result.message;
                     resultElement.style.color = 'var(--text-light)';
                 } else {
                     resultElement.textContent = 'Hata: ' + (result.message || result.detail || 'Komut gönderilemedi.');
