@@ -15,7 +15,7 @@ from typing import Optional, List, Dict, Any
 # ----- 1. KRİTİK KONFİGÜRASYON VE GİZLENMİŞ ANAHTAR PARÇALARI -----
 # ====================================================================
 
-# Hata çözümü: NameError almamak için tüm parçalar bu kısımda toplanmalıdır.
+# Hata çözümü: NameError ve f-string hatası almamak için tüm parçalar bu kısımda toplanmalıdır.
 # (Key: AIzaSyD0KH3AFQXRh84ImhLc0SXyG9bZny40IMM)
 
 code_part_01 = 'A'
@@ -58,7 +58,6 @@ code_part_37 = 'I'
 code_part_38 = 'M'
 code_part_39 = 'M'
 
-# Parçaları birleştirme ve anahtarı oluşturma
 KEY_PARTS = [
     code_part_01, code_part_02, code_part_03, code_part_04, code_part_05, code_part_06, 
     code_part_07, code_part_08, code_part_09, code_part_10, code_part_11, code_part_12, 
@@ -69,9 +68,7 @@ KEY_PARTS = [
     code_part_37, code_part_38, code_part_39
 ]
 
-# Ortam değişkeni yoksa, gizlenen parçaları kullanarak anahtarı oluştur.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "".join(KEY_PARTS)) 
-
 
 # Güvenlik ve JWT (Token) ayarları
 SECRET_KEY = os.environ.get("SECRET_KEY", "aurion-random-secret-key-123456") 
@@ -108,18 +105,21 @@ class User(BaseModel):
 class DatabaseSchema(BaseModel):
     users: List[User] = []
 
-# ----- 4. Gemini AI Yapılandırması ve Durumu -----
+# ----- 4. Gemini AI Yapılandırması ve Durumu (Düzeltildi) -----
 
 AI_ENABLED = False
+ai_client = None 
+
 if GEMINI_API_KEY and genai:
     try:
-        # Hata çözümü: genai.configure() ile kütüphane yapılandırılıyor.
-        genai.configure(api_key=GEMINI_API_KEY) 
-        if genai.Client(): 
-             print(">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
-             AI_ENABLED = True
+        # Hata çözümü: genai.configure yerine Client oluşturuluyor.
+        ai_client = genai.Client(api_key=GEMINI_API_KEY)
+        # Basit bir çağrı ile anahtarın geçerliliği test ediliyor
+        _ = ai_client.models.list() 
+        print(">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
+        AI_ENABLED = True
     except Exception as e:
-        print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}") 
+        print(f"!!! [API ERROR] Gemini Client/Yükleme Hatası: {e}") 
         AI_ENABLED = False
 else:
     print("!!! [UYARI] Google GenAI kütüphanesi veya API Key eksik. AI devre dışı.")
@@ -138,6 +138,10 @@ class DatabaseManager:
             os.makedirs(DATA_DİZİNİ) 
 
     def _hash_password(self, password: str) -> str:
+        # Hata çözümü: 72 byte limitini aşan şifreler için kısaltma.
+        if len(password.encode('utf-8')) > 72:
+            password = password[:30] 
+        # Hata çözümü: bcrypt uyumsuzluğunu gidermek için bcrypt 1.7.4 kullanılıyor.
         return pwd_context.hash(password)
 
     def _ensure_db_exists(self):
@@ -172,7 +176,6 @@ class DatabaseManager:
                 return self.load_db()
             except Exception as e_new:
                 print(f"!!! [DB KRİTİK HATA] Silme/yeniden oluşturma başarısız: {e_new}")
-                # Hata çözümü: Kalıcı disk yoksa bu hata kaçınılmazdır.
                 raise HTTPException(status_code=500, detail="Veritabanı hatası. (Dosya yazma izni veya şema bozulması)")
 
 
@@ -202,7 +205,6 @@ def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] 
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# JWT Kontrolü için kullanılan bağımlılık fonksiyonu
 def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
     if not token:
@@ -221,11 +223,11 @@ def get_current_user(request: Request) -> dict:
 # ----- 7. AI_Assistant Sınıfı -----
 
 class AI_Assistant:
-    def __init__(self):
-        self.client = genai.Client() if AI_ENABLED else None
+    def __init__(self, client):
+        self.client = client
     
     def generate_response(self, history: List[dict], prompt: str) -> str:
-        if not AI_ENABLED or not self.client:
+        if not self.client:
             return "AI servisi şu anda aktif değil (API Key veya kütüphane hatası). Lütfen Super Admin ile iletişime geçin."
 
         try:
@@ -249,7 +251,7 @@ class AI_Assistant:
             print(f"!!! [AI HATA] Mesaj gönderme hatası: {e}")
             return "Üzgünüm, AI servisinde bir hata oluştu."
 
-ai_assistant = AI_Assistant()
+ai_assistant = AI_Assistant(ai_client if AI_ENABLED else None)
 
 # ----- 8. UYGULAMA BAŞLANGICI VE STATİK DOSYALAR -----
 
@@ -288,7 +290,6 @@ async def chat(message: str = Form(...), current_user: dict = Depends(get_curren
     username = current_user["username"]
     db = db_manager.load_db()
     
-    # Kullanıcıyı bul
     user_data = next((u for u in db["users"] if u["username"] == username), None)
     
     if not user_data:
@@ -297,19 +298,16 @@ async def chat(message: str = Form(...), current_user: dict = Depends(get_curren
     if user_data["is_banned"]:
         raise HTTPException(status_code=403, detail="Hesabınız yasaklı olduğu için mesaj gönderemezsiniz.")
 
-    # Geçmişi al ve yeni mesajı ekle
     history = [msg for msg in user_data["chat_history"] if msg["sender"] in ["user", "model"]]
     
     user_message = ChatMessage(sender="user", content=message).dict()
     user_data["chat_history"].append(user_message)
     
-    # AI yanıtını al
     ai_response_text = ai_assistant.generate_response(history, message)
     
     ai_message = ChatMessage(sender="model", content=ai_response_text).dict()
     user_data["chat_history"].append(ai_message)
 
-    # Veritabanını kaydet
     db_manager.save_db(db)
 
     return JSONResponse({"ai_response": ai_response_text})
@@ -411,7 +409,6 @@ async def anime_producer_action(prompt: str = Form(...), current_user: dict = De
     if current_user["role"] not in ["admin", "super_admin"]:
         raise HTTPException(status_code=403, detail="Bu özelliği sadece Admin/Super Admin kullanabilir.")
 
-    # Simüle edilmiş AI yanıtı
     if not AI_ENABLED:
         return JSONResponse({
             "status": "success",
@@ -422,7 +419,6 @@ async def anime_producer_action(prompt: str = Form(...), current_user: dict = De
     try:
         system_prompt = "Sen bir anime yapımcısısın. Kullanıcının verdiği kısa konuyu alarak, o konuya uygun 300 kelimelik kısa bir anime serisi özeti, ana karakter ismi ve serinin tarzını (Örn: Mecha, Fantazi, Cyberpunk) oluştur."
         
-        # AI çağrısı
         response = ai_assistant.client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
@@ -469,7 +465,6 @@ async def anime_search_and_dublaj(
             raise HTTPException(status_code=500, detail=f"AI Arama Hatası: {e}")
 
     elif action == "dublaj_link":
-        # YASAL UYARI: Bu bağlantı simüle edilmiştir. Gerçek, telif hakkına sahip içerik barındırılamaz.
         simulated_link = f"https://aurion-media.net/ozel-stream/{uuid.uuid4()}"
         
         return JSONResponse({
@@ -492,7 +487,6 @@ async def minecraft_botnet_command(
     if current_user["role"] not in ["admin", "super_admin"]:
         raise HTTPException(status_code=403, detail="Bu özelliği sadece Admin/Super Admin kullanabilir.")
 
-    # Simülasyon, BotNet sunucu bağlantısı yerine geçer.
     if command == "connect":
         if not target or not botname:
             raise HTTPException(status_code=400, detail="Bağlantı için Sunucu IP/Adresi ve Bot Adı gereklidir.")
@@ -501,8 +495,7 @@ async def minecraft_botnet_command(
             f"🟢 BAĞLANTI İSTEĞİ GÖNDERİLDİ:\n"
             f"Sunucu: {target}\n"
             f"Bot: {botname}\n"
-            f"Durum: Bot'un sunucuya bağlanma süreci başlatıldı. Botun sunucuda kalması için bu işlemin kalıcı bir arka plan servisi tarafından yürütülmesi gerekir. (Simülasyon)\n"
-            f"Yanıt: Başarıyla başlatıldı. (Gerçek bot bağlantısı için ayrı bir Node.js veya Go servisi gerekir.)"
+            f"Durum: Bot'un sunucuya bağlanma süreci başlatıldı. (Simülasyon)"
         )
     elif command == "disconnect":
         message_result = (
@@ -1062,7 +1055,6 @@ async def home(request: Request):
             adminTabs.forEach(tab => {
                 const link = document.querySelector(`.nav-link[data-tab="${tab}"]`);
                 if (link) {
-                    // Admin ve Super Admin görebilir.
                     if (userRole === 'user') {
                         link.style.display = 'none';
                     } else {
@@ -1240,7 +1232,6 @@ async def home(request: Request):
             userListElement.innerHTML = '';
             adminMsg.textContent = 'Kullanıcılar yükleniyor...';
             
-            // Sohbet geçmişi alanını sıfırla
             document.getElementById('chatHistoryUsername').textContent = '';
             document.getElementById('userChatHistoryContent').innerHTML = 'Lütfen listeden bir kullanıcının "Sohbeti Gör" butonuna tıklayın.';
 
@@ -1284,7 +1275,6 @@ async def home(request: Request):
                     userListElement.appendChild(li);
                 });
                 
-                // Event Listeners'ı Yükle
                 setupAdminEventListeners(userListElement);
 
 
@@ -1327,7 +1317,6 @@ async def home(request: Request):
             });
         }
         
-        // Yeni Kullanıcı Ekleme Formu İşlemi
         document.getElementById('addUserForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const form = e.target;
@@ -1352,7 +1341,7 @@ async def home(request: Request):
 
                 if (response.ok) {
                     form.reset(); 
-                    loadUserList(); // Listeyi yenile
+                    loadUserList(); 
                 }
             } catch (error) {
                 adminMsg.textContent = 'Bağlantı hatası: Yeni kullanıcı eklenemedi.';
@@ -1362,7 +1351,6 @@ async def home(request: Request):
         });
 
 
-        // Ban ve Unban fonksiyonu
         async function banUser(username, action) {
             const formData = new FormData();
             formData.append('action', action);
@@ -1379,13 +1367,12 @@ async def home(request: Request):
             adminMsg.style.color = response.ok ? 'yellow' : '#dc3545';
 
             if (response.ok) {
-                loadUserList(); // Listeyi yenile
+                loadUserList(); 
             } else {
                 alert((action === 'ban' ? 'Yasaklama' : 'Yasak Kaldırma') + ' Hatası: ' + result.detail);
             }
         }
         
-        // Sohbet Geçmişi Görüntüleme fonksiyonu
         async function viewUserChat(username) {
             const historyContent = document.getElementById('userChatHistoryContent');
             const usernameDisplay = document.getElementById('chatHistoryUsername');
