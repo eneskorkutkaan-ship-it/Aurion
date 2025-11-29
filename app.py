@@ -21,7 +21,6 @@ except ImportError:
 # ----- 2. KONFİGÜRASYON VE SABİTLER (API Key) -----
 
 # Kendi Gemini API anahtarınızı buraya girin!
-# Örnek: GEMINI_API_KEY = "AIzaSyD0KH3AFQXRh84ImhLc0SXyG9bZny40IMM"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
 # Güvenlik ve JWT (Token) ayarları
@@ -48,6 +47,7 @@ class User(BaseModel):
     password: str
     role: str = "user" 
     chat_history: List[ChatMessage] = [] 
+    is_banned: bool = False # YENİ: Yasaklama durumu
 
 class DatabaseSchema(BaseModel):
     users: List[User] = []
@@ -90,7 +90,8 @@ class DatabaseManager:
 
             initial_data = {
                 "users": [
-                    User(id=str(uuid.uuid4()), username="enes", role="super_admin", password=admin_password_hash, chat_history=[]).dict(),
+                    # is_banned=False ile varsayılan kullanıcı oluşturuluyor
+                    User(id=str(uuid.uuid4()), username="enes", role="super_admin", password=admin_password_hash, chat_history=[], is_banned=False).dict(),
                 ]
             }
             try:
@@ -210,6 +211,10 @@ async def login(username: str = Form(...), password: str = Form(...)):
     if not user_record or not verify_password(password, user_record["password"]):
         raise HTTPException(status_code=401, detail="Hatalı kullanıcı adı veya şifre")
 
+    # YENİ: Yasaklama kontrolü
+    if user_record.get("is_banned", False):
+         raise HTTPException(status_code=403, detail="Hesabınız askıya alınmıştır. Lütfen yönetici ile iletişime geçin.")
+
     access_token_expires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user_record["username"], "role": user_record["role"]}, 
@@ -231,6 +236,10 @@ async def get_chat_history(current_user: dict = Depends(get_current_user)):
     user_record = next((u for u in db["users"] if u["username"] == user_name), None)
     if not user_record:
         raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+    
+    # YENİ: Kendi geçmişinde ban kontrolü (Zaten giriş yaptı, ama sohbet engeli olabilir)
+    if user_record.get("is_banned", False):
+        return {"history": [{"sender": "ai", "content": "Sohbet yetkiniz askıya alınmıştır. Yönetici ile görüşün."}]}
 
     return {"history": user_record.get("chat_history", [])}
 
@@ -247,6 +256,10 @@ async def chat_message(request: Request, current_user: dict = Depends(get_curren
     db = db_manager.load_db()
     user_index, user_record = next(((i, u) for i, u in enumerate(db["users"]) if u["username"] == user_name), (None, None))
     if user_record is None: raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+    
+    # YENİ: Sohbet ederken ban kontrolü
+    if user_record.get("is_banned", False):
+         raise HTTPException(status_code=403, detail="Sohbet etme yetkiniz askıya alınmıştır.")
     
     current_history = user_record.get("chat_history", [])
     
@@ -312,32 +325,56 @@ async def get_users(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
     db = db_manager.load_db()
-    # Kapanış Parantezi Hatası Düzeltildi
-    users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"]} for u in db["users"]] 
+    # is_banned dahil edildi
+    users_clean = [{"username": u["username"], "role": u["role"], "id": u["id"], "is_banned": u["is_banned"]} for u in db["users"]] 
     return {"users": users_clean}
 
+# YENİ ENDPOINT: Kullanıcı sohbet geçmişini Super Admin'e göstermek için
+@app.get("/api/admin/chat_history/{username}")
+async def admin_get_chat_history(username: str, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
+    
+    db = db_manager.load_db()
+    
+    user_record = next((u for u in db["users"] if u["username"] == username), None)
+    if not user_record:
+        raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+
+    return {"history": user_record.get("chat_history", []), "username": username}
+
+
 @app.post("/api/admin/user_action")
-async def user_action(action: str = Form(...), username: str = Form(...), password: Optional[str] = Form(None), role: Optional[str] = Form("user"), current_user: dict = Depends(get_current_user)):
+async def user_action(action: str = Form(...), username: str = Form(...), current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
 
     db = db_manager.load_db()
-
+    user_index, user_record = next(((i, u) for i, u in enumerate(db["users"]) if u["username"] == username), (None, None))
+    
     if action == "add":
-        if not password:
-            raise HTTPException(status_code=400, detail="Yeni kullanıcı için şifre zorunludur.")
-        if any(u["username"] == username for u in db["users"]):
-            raise HTTPException(status_code=400, detail="Bu kullanıcı adı zaten mevcut.")
-        
-        hashed_password = pwd_context.hash(password)
-        new_user = User(id=str(uuid.uuid4()), username=username, password=hashed_password, role=role, chat_history=[]).dict()
-        db["users"].append(new_user)
+        # HESAP AÇMA İSTEĞİ ÜZERİNE KALDIRILDI
+        raise HTTPException(status_code=403, detail="Kullanıcı oluşturma yetkisi kaldırılmıştır.")
+
+    elif action in ["ban", "unban"]:
+        if username == current_user["username"]: 
+            raise HTTPException(status_code=403, detail="Kendi hesabınızı yasaklayamazsınız.")
+        if user_record is None:
+            raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+        if user_record["role"] == "super_admin" and username != current_user["username"]:
+            # Başka bir Super Admin'i yasaklamayı engelle
+            raise HTTPException(status_code=403, detail="Başka bir Super Admin'i yasaklayamazsınız.")
+
+
+        is_banning = (action == "ban")
+        db["users"][user_index]["is_banned"] = is_banning
         db_manager.save_db(db)
-        return {"status": "success", "message": f"Kullanıcı '{username}' ({role}) başarıyla eklendi."}
+        status_text = "yasaklandı" if is_banning else "yasağı kaldırıldı"
+        return {"status": "success", "message": f"Kullanıcı '{username}' başarıyla {status_text}."}
 
     elif action == "delete":
-        if username == "enes": 
-            raise HTTPException(status_code=403, detail="Varsayılan Super Admin silinemez.")
+        if username == "enes" or user_record["role"] == "super_admin": 
+            raise HTTPException(status_code=403, detail="Super Admin veya varsayılan hesap silinemez.")
         
         initial_count = len(db["users"])
         db["users"] = [u for u in db["users"] if u["username"] != username]
@@ -352,7 +389,6 @@ async def user_action(action: str = Form(...), username: str = Form(...), passwo
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_dashboard(request: Request):
-    # HTML içeriği F-string hatası çözülmüş şekilde buraya eklenmiştir.
     html_content = """
 <!DOCTYPE html>
 <html lang="tr">
@@ -604,9 +640,15 @@ async def serve_dashboard(request: Request):
         .delete-btn {
             background-color: #dc3545;
             padding: 5px 10px;
+            margin-left: 5px;
         }
         .delete-btn:hover {
             background-color: #c82333;
+        }
+        .ban-btn, .view-chat-btn {
+            padding: 5px 10px;
+            margin-left: 5px;
+            font-size: 14px;
         }
         .input-group {
             display: flex;
@@ -615,6 +657,12 @@ async def serve_dashboard(request: Request):
         }
         .input-group input {
             flex-grow: 1;
+        }
+        .chat-admin-message {
+            margin-bottom: 10px;
+            padding: 5px;
+            border-radius: 4px;
+            font-size: 14px;
         }
 
 
@@ -718,22 +766,16 @@ async def serve_dashboard(request: Request):
                 <h2 class="tab-title">Kullanıcı Yönetimi (Super Admin)</h2>
                 
                 <div class="admin-section">
-                    <h3>Kullanıcı Ekle</h3>
-                    <form id="addUserForm" class="admin-form">
-                        <input type="text" name="username" placeholder="Kullanıcı Adı" required>
-                        <input type="password" name="password" placeholder="Şifre" required>
-                        <select name="role">
-                            <option value="user">User</option>
-                            <option value="super_admin">Super Admin</option>
-                        </select>
-                        <button type="submit">Kullanıcı Ekle</button>
-                    </form>
-                </div>
-
-                <div class="admin-section">
-                    <h3>Mevcut Kullanıcılar</h3>
+                    <h3>Mevcut Kullanıcılar (Yönetim, Ban ve Sohbet)</h3>
                     <ul id="userList">
                         </ul>
+                </div>
+
+                <div class="admin-section" id="chatHistorySection">
+                    <h3>Sohbet Geçmişi Görüntüleme: <span id="chatHistoryUsername" style="color: var(--primary);"></span></h3>
+                    <div id="userChatHistoryContent" style="height: 300px; overflow-y: scroll; background-color: var(--input-bg); padding: 10px; border-radius: 6px;">
+                        Lütfen yukarıdaki listeden bir kullanıcının "Sohbeti Gör" butonuna tıklayın.
+                    </div>
                 </div>
                 
                 <div id="adminMessage" style="margin-top: 15px; color: yellow;"></div>
@@ -931,6 +973,11 @@ async def serve_dashboard(request: Request):
                      return; 
                 }
                 if (!response.ok) {
+                    const error = await response.json();
+                    if(error.detail) {
+                        addMessage('ai', error.detail, true);
+                        return;
+                    }
                     throw new Error("Geçmiş yüklenemedi.");
                 }
                 const data = await response.json();
@@ -992,6 +1039,10 @@ async def serve_dashboard(request: Request):
             const adminMsg = document.getElementById('adminMessage');
             userListElement.innerHTML = '';
             adminMsg.textContent = 'Kullanıcılar yükleniyor...';
+            
+            // Sohbet geçmişi alanını sıfırla
+            document.getElementById('chatHistoryUsername').textContent = '';
+            document.getElementById('userChatHistoryContent').innerHTML = 'Lütfen yukarıdaki listeden bir kullanıcının "Sohbeti Gör" butonuna tıklayın.';
 
             try {
                 const response = await fetch('/api/admin/users');
@@ -1012,26 +1063,28 @@ async def serve_dashboard(request: Request):
                 adminMsg.textContent = `Toplam ${users.length} kullanıcı bulundu.`;
 
                 users.forEach(user => {
+                    const isBanned = user.is_banned;
+                    const banText = isBanned ? 'Yasağı Kaldır' : 'Yasakla';
+                    const banAction = isBanned ? 'unban' : 'ban';
+                    const statusColor = isBanned ? 'color: #ffc107; font-weight: bold;' : 'color: #28a745; font-weight: bold;';
+
                     const li = document.createElement('li');
                     li.innerHTML = `
-                        <span>${user.username} (${user.role})</span>
-                        <button class="delete-btn" data-username="${user.username}">Sil</button>
+                        <span>
+                            ${user.username} (${user.role}) 
+                            <span style="${statusColor}">[${isBanned ? 'YASAKLI' : 'AKTİF'}]</span>
+                        </span>
+                        <div>
+                            <button class="view-chat-btn" data-username="${user.username}" style="background-color: #5bc0de;">Sohbeti Gör</button>
+                            <button class="ban-btn" data-username="${user.username}" data-action="${banAction}" style="background-color: ${isBanned ? '#28a745' : '#ffc107'};">${banText}</button>
+                            <button class="delete-btn" data-username="${user.username}">Sil</button>
+                        </div>
                     `;
                     userListElement.appendChild(li);
                 });
-
-                userListElement.querySelectorAll('.delete-btn').forEach(button => {
-                    button.addEventListener('click', async (e) => {
-                        const usernameToDelete = e.target.getAttribute('data-username');
-                        if (usernameToDelete === 'enes') {
-                             alert('Varsayılan Super Admin silinemez.');
-                             return;
-                        }
-                        if (confirm(`Kullanıcı ${usernameToDelete} silinsin mi?`)) {
-                            await deleteUser(usernameToDelete);
-                        }
-                    });
-                });
+                
+                // Event Listeners'ı Yükle
+                setupAdminEventListeners(userListElement);
 
 
             } catch (error) {
@@ -1039,27 +1092,108 @@ async def serve_dashboard(request: Request):
                 console.error('Kullanıcı listesi hatası:', error);
             }
         }
+        
+        function setupAdminEventListeners(userListElement) {
+            userListElement.querySelectorAll('.ban-btn').forEach(button => {
+                button.addEventListener('click', async (e) => {
+                    const username = e.target.getAttribute('data-username');
+                    const action = e.target.getAttribute('data-action');
+                    const actionText = action === 'ban' ? 'yasaklansın' : 'yasağı kaldırılsın';
+                    if (confirm(`Kullanıcı ${username} ${actionText} mı?`)) {
+                        await banUser(username, action);
+                    }
+                });
+            });
 
-        document.getElementById('addUserForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const form = e.target;
-            const formData = new FormData(form);
-            formData.append('action', 'add');
+            userListElement.querySelectorAll('.view-chat-btn').forEach(button => {
+                button.addEventListener('click', async (e) => {
+                    const username = e.target.getAttribute('data-username');
+                    await viewUserChat(username);
+                });
+            });
             
+            userListElement.querySelectorAll('.delete-btn').forEach(button => {
+                button.addEventListener('click', async (e) => {
+                    const usernameToDelete = e.target.getAttribute('data-username');
+                    if (usernameToDelete === 'enes') {
+                         alert('Varsayılan Super Admin silinemez.');
+                         return;
+                    }
+                    if (confirm(`Kullanıcı ${usernameToDelete} silinsin mi?`)) {
+                        await deleteUser(usernameToDelete);
+                    }
+                });
+            });
+        }
+
+
+        // YENİ: Ban ve Unban fonksiyonu
+        async function banUser(username, action) {
+            const formData = new FormData();
+            formData.append('action', action);
+            formData.append('username', username);
+
             const response = await fetch('/api/admin/user_action', {
                 method: 'POST',
                 body: new URLSearchParams(formData)
             });
 
             const result = await response.json();
-            document.getElementById('adminMessage').textContent = result.message || result.detail;
+            const adminMsg = document.getElementById('adminMessage');
+            adminMsg.textContent = result.message || result.detail;
+
             if (response.ok) {
-                form.reset();
-                loadUserList();
+                loadUserList(); // Listeyi yenile
             } else {
-                 alert('Hata: ' + result.detail);
+                alert((action === 'ban' ? 'Yasaklama' : 'Yasak Kaldırma') + ' Hatası: ' + result.detail);
             }
+        }
+        
+        // YENİ: Sohbet Geçmişi Görüntüleme fonksiyonu
+        async function viewUserChat(username) {
+            const historyContent = document.getElementById('userChatHistoryContent');
+            const usernameDisplay = document.getElementById('chatHistoryUsername');
+            historyContent.innerHTML = '<div style="color: yellow;">Geçmiş yükleniyor...</div>';
+            usernameDisplay.textContent = username;
+
+            try {
+                const response = await fetch(`/api/admin/chat_history/${username}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                     throw new Error(data.detail || 'Geçmiş yüklenemedi. (403/404 Hatası)');
+                }
+
+                historyContent.innerHTML = '';
+                if (data.history.length === 0) {
+                     historyContent.innerHTML = '<div style="color: var(--text-muted);">Bu kullanıcının sohbet geçmişi bulunmamaktadır.</div>';
+                     return;
+                }
+
+                data.history.forEach(msg => {
+                    const p = document.createElement('p');
+                    const timestamp = new Date(msg.timestamp).toLocaleTimeString();
+                    const isUser = msg.sender === 'user';
+                    
+                    p.classList.add('chat-admin-message');
+                    p.style.backgroundColor = isUser ? 'rgba(93, 93, 255, 0.2)' : 'rgba(255, 93, 158, 0.1)';
+                    p.innerHTML = `<strong>[${timestamp}] ${isUser ? 'KULLANICI' : 'AURION'}:</strong> ${msg.content}`;
+                    historyContent.appendChild(p);
+                });
+                historyContent.scrollTop = historyContent.scrollHeight;
+
+            } catch (error) {
+                historyContent.innerHTML = '<div style="color: #dc3545;">Hata: ' + error.message + '</div>';
+                console.error('Sohbet geçmişi hatası:', error);
+            }
+        }
+
+        // KULLANICI EKLEME KALDIRILDIĞI İÇİN bu event listener KALDIRILDI.
+        /*
+        document.getElementById('addUserForm').addEventListener('submit', async (e) => {
+            // ... (Kullanıcı ekleme mantığı)
         });
+        */
 
         async function deleteUser(username) {
             const formData = new FormData();
