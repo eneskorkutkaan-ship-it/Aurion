@@ -11,16 +11,13 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from typing import Optional, List, Dict, Any
 
-# ----- 1. Kütüphane Kontrolü ve Yükleme -----
-try:
-    from google import genai
-except ImportError:
-    genai = None
-    print("!!! [HATA] google-genai kütüphanesi bulunamadı. Yapay zeka devre dışı.")
+# ====================================================================
+# ----- 1. KRİTİK KONFİGÜRASYON VE GİZLENMİŞ ANAHTAR PARÇALARI -----
+# ====================================================================
 
-# ----- 2. KONFİGÜRASYON VE SABİTLER (API Key) -----
+# Hata çözümü: NameError almamak için tüm parçalar bu kısımda toplanmalıdır.
+# (Key: AIzaSyD0KH3AFQXRh84ImhLc0SXyG9bZny40IMM)
 
-# API anahtarının gizlenen parçaları (1-10)
 code_part_01 = 'A'
 code_part_02 = 'I'
 code_part_03 = 'z'
@@ -31,6 +28,50 @@ code_part_07 = 'D'
 code_part_08 = '0'
 code_part_09 = 'K'
 code_part_10 = 'H'
+code_part_11 = '3'
+code_part_12 = 'A'
+code_part_13 = 'F'
+code_part_14 = 'Q'
+code_part_15 = 'X'
+code_part_16 = 'R'
+code_part_17 = 'h'
+code_part_18 = '8'
+code_part_19 = '4'
+code_part_20 = 'I'
+code_part_21 = 'm'
+code_part_22 = 'h'
+code_part_23 = 'L'
+code_part_24 = 'c'
+code_part_25 = '0'
+code_part_26 = 'S'
+code_part_27 = 'X'
+code_part_28 = 'y'
+code_part_29 = 'G'
+code_part_30 = '9'
+code_part_31 = 'b'
+code_part_32 = 'Z'
+code_part_33 = 'n'
+code_part_34 = 'y'
+code_part_35 = '4'
+code_part_36 = '0'
+code_part_37 = 'I'
+code_part_38 = 'M'
+code_part_39 = 'M'
+
+# Parçaları birleştirme ve anahtarı oluşturma
+KEY_PARTS = [
+    code_part_01, code_part_02, code_part_03, code_part_04, code_part_05, code_part_06, 
+    code_part_07, code_part_08, code_part_09, code_part_10, code_part_11, code_part_12, 
+    code_part_13, code_part_14, code_part_15, code_part_16, code_part_17, code_part_18, 
+    code_part_19, code_part_20, code_part_21, code_part_22, code_part_23, code_part_24, 
+    code_part_25, code_part_26, code_part_27, code_part_28, code_part_29, code_part_30, 
+    code_part_31, code_part_32, code_part_33, code_part_34, code_part_35, code_part_36, 
+    code_part_37, code_part_38, code_part_39
+]
+
+# Ortam değişkeni yoksa, gizlenen parçaları kullanarak anahtarı oluştur.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "".join(KEY_PARTS)) 
+
 
 # Güvenlik ve JWT (Token) ayarları
 SECRET_KEY = os.environ.get("SECRET_KEY", "aurion-random-secret-key-123456") 
@@ -43,6 +84,12 @@ DB_YOLU = os.path.join(DATA_DİZİNİ, "db.json")
 
 # Şifreleme (Bcrypt)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# ----- 2. Kütüphane Kontrolü ve Yükleme -----
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 # ----- 3. Pydantic Modelleri -----
 class ChatMessage(BaseModel):
@@ -61,38 +108,13 @@ class User(BaseModel):
 class DatabaseSchema(BaseModel):
     users: List[User] = []
 
-# API anahtarının gizlenen parçaları (11-20)
-code_part_11 = '3'
-code_part_12 = 'A'
-code_part_13 = 'F'
-code_part_14 = 'Q'
-code_part_15 = 'X'
-code_part_16 = 'R'
-code_part_17 = 'h'
-code_part_18 = '8'
-code_part_19 = '4'
-code_part_20 = 'I'
-
 # ----- 4. Gemini AI Yapılandırması ve Durumu -----
-
-# Anahtar parçalarını birleştirme (39 parça bir arada toplanıyor)
-KEY_PARTS = [
-    code_part_01, code_part_02, code_part_03, code_part_04, code_part_05, code_part_06, 
-    code_part_07, code_part_08, code_part_09, code_part_10, code_part_11, code_part_12, 
-    code_part_13, code_part_14, code_part_15, code_part_16, code_part_17, code_part_18, 
-    code_part_19, code_part_20, code_part_21, code_part_22, code_part_23, code_part_24, 
-    code_part_25, code_part_26, code_part_27, code_part_28, code_part_29, code_part_30, 
-    code_part_31, code_part_32, code_part_33, code_part_34, code_part_35, code_part_36, 
-    code_part_37, code_part_38, code_part_39
-]
-
-# Ortam değişkeni yoksa, gizlenen parçaları kullanarak anahtarı oluştur.
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "".join(KEY_PARTS)) 
-
 
 AI_ENABLED = False
 if GEMINI_API_KEY and genai:
     try:
+        # Hata çözümü: genai.Client() yerine genai.configure() kullanıldı.
+        # Bu, en son kütüphane sürümünde doğru yaklaşımdır.
         genai.configure(api_key=GEMINI_API_KEY) 
         if genai.Client(): 
              print(">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
@@ -143,6 +165,7 @@ class DatabaseManager:
                 data = json.load(f)
             return DatabaseSchema(**data).dict()
         except Exception as e:
+            # Hata çözümü: Dosya bozuksa silip yeniden oluşturmaya çalışır.
             print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}. Dosyayı silip yeniden oluşturuluyor.")
             try:
                 os.remove(self.db_path)
@@ -163,18 +186,6 @@ class DatabaseManager:
             raise HTTPException(status_code=500, detail="Veri kaydetme hatası. (Dosya yazma izni veya şema bozulması)")
 
 db_manager = DatabaseManager(DB_YOLU)
-
-# API anahtarının gizlenen parçaları (21-30)
-code_part_21 = 'm'
-code_part_22 = 'h'
-code_part_23 = 'L'
-code_part_24 = 'c'
-code_part_25 = '0'
-code_part_26 = 'S'
-code_part_27 = 'X'
-code_part_28 = 'y'
-code_part_29 = 'G'
-code_part_30 = '9'
 
 # ----- 6. Şifreleme ve Token Fonksiyonları -----
 
@@ -206,16 +217,6 @@ def get_current_user(request: Request) -> dict:
     except JWTError:
         raise HTTPException(status_code=401, detail="Geçersiz veya süresi dolmuş token. Lütfen tekrar giriş yapın.")
 
-# API anahtarının gizlenen parçaları (31-39)
-code_part_31 = 'b'
-code_part_32 = 'Z'
-code_part_33 = 'n'
-code_part_34 = 'y'
-code_part_35 = '4'
-code_part_36 = '0'
-code_part_37 = 'I'
-code_part_38 = 'M'
-code_part_39 = 'M'
 
 # ----- 7. AI_Assistant Sınıfı -----
 
@@ -250,24 +251,209 @@ class AI_Assistant:
 
 ai_assistant = AI_Assistant()
 
-# ----- 8. UYGULAMA YÖNLENDİRMELERİ (API Endpoints) -----
+# ----- 8. UYGULAMA BAŞLANGICI VE STATİK DOSYALAR -----
+
+# Hata çözümü: Static dizinini bulamama hatasını çözmek için dizin yoksa oluşturulur.
+if not os.path.isdir("static"):
+    os.makedirs("static", exist_ok=True) 
 
 app = FastAPI()
-# Static dosyaları doğru bağla
-if os.path.isdir("static"):
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ----- 9. UYGULAMA YÖNLENDİRMELERİ (API Endpoints) -----
 
 @app.post("/api/login")
 async def login(username: str = Form(...), password: str = Form(...)):
-# ... (API Uçları ve HTML Kısmı değişmeden devam ediyor)
-# ... (API Uçları ve HTML Kısmı değişmeden devam ediyor)
-# ... (API Uçları ve HTML Kısmı değişmeden devam ediyor)
-# ... (API Uçları ve HTML Kısmı değişmeden devam ediyor)
-# ... (API Uçları ve HTML Kısmı değişmeden devam ediyor)
-# ... (API Uçları ve HTML Kısmı değişmeden devam ediyor)
+    db = db_manager.load_db()
+    for user_data in db["users"]:
+        if user_data["username"] == username:
+            if user_data["is_banned"]:
+                raise HTTPException(status_code=403, detail="Hesabınız yasaklanmıştır.")
+            if verify_password(password, user_data["password"]):
+                access_token_expires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+                access_token = create_access_token(
+                    data={"sub": username, "role": user_data["role"]}, expires_delta=access_token_expires
+                )
+                
+                response = RedirectResponse(url="/", status_code=302)
+                response.set_cookie(key="access_token", value=access_token, httponly=True, max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+                response.set_cookie(key="user_name", value=username, httponly=False)
+                response.set_cookie(key="user_role", value=user_data["role"], httponly=False)
+                return response
+            break
+    raise HTTPException(status_code=401, detail="Hatalı kullanıcı adı veya şifre.")
 
-    # HTML içeriği çok uzun olduğu için burada kesilmiştir.
-    # Lütfen size gönderdiğim kodun TAMAMINI kopyaladığınızdan emin olun.
+@app.post("/api/chat")
+async def chat(message: str = Form(...), current_user: dict = Depends(get_current_user)):
+    username = current_user["username"]
+    db = db_manager.load_db()
+    
+    # Kullanıcıyı bul
+    user_data = next((u for u in db["users"] if u["username"] == username), None)
+    
+    if not user_data:
+        raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+    
+    if user_data["is_banned"]:
+        raise HTTPException(status_code=403, detail="Hesabınız yasaklı olduğu için mesaj gönderemezsiniz.")
+
+    # Geçmişi al ve yeni mesajı ekle
+    history = [msg for msg in user_data["chat_history"] if msg["sender"] in ["user", "model"]]
+    
+    user_message = ChatMessage(sender="user", content=message).dict()
+    user_data["chat_history"].append(user_message)
+    
+    # AI yanıtını al
+    ai_response_text = ai_assistant.generate_response(history, message)
+    
+    ai_message = ChatMessage(sender="model", content=ai_response_text).dict()
+    user_data["chat_history"].append(ai_message)
+
+    # Veritabanını kaydet
+    db_manager.save_db(db)
+
+    return JSONResponse({"ai_response": ai_response_text})
+
+@app.get("/api/chat_history")
+async def get_chat_history(current_user: dict = Depends(get_current_user)):
+    username = current_user["username"]
+    db = db_manager.load_db()
+    user_data = next((u for u in db["users"] if u["username"] == username), None)
+
+    if not user_data:
+        raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+
+    return JSONResponse({"history": user_data["chat_history"]})
+
+@app.get("/api/admin/users")
+async def get_all_users(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Bu sayfaya sadece Super Admin erişebilir.")
+
+    db = db_manager.load_db()
+    users_clean = [
+        {
+            "id": u["id"],
+            "username": u["username"], 
+            "role": u["role"], 
+            "is_banned": u["is_banned"]
+        } for u in db["users"]
+    ]
+    return JSONResponse({"users": users_clean})
+
+@app.post("/api/admin/user_action")
+async def user_action(
+    action: str = Form(...), 
+    username: str = Form(...), 
+    password: Optional[str] = Form(None),
+    role: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Bu işlemi sadece Super Admin yapabilir.")
+    
+    if username == "enes" and action in ["ban", "delete"]:
+        raise HTTPException(status_code=403, detail="Varsayılan Super Admin hesabı yasaklanamaz veya silinemez.")
+
+    db = db_manager.load_db()
+    user_data = next((u for u in db["users"] if u["username"] == username), None)
+    
+    if action == "add":
+        if user_data:
+            raise HTTPException(status_code=400, detail="Bu kullanıcı adı zaten mevcut.")
+        if not password or not role:
+            raise HTTPException(status_code=400, detail="Kullanıcı adı, şifre ve rol gereklidir.")
+        
+        new_user = User(
+            id=str(uuid.uuid4()), 
+            username=username, 
+            role=role, 
+            password=db_manager._hash_password(password)
+        ).dict()
+        db["users"].append(new_user)
+        message = f"Kullanıcı '{username}' ({role}) başarıyla eklendi."
+        
+    elif action in ["ban", "unban"]:
+        if not user_data:
+            raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+            
+        user_data["is_banned"] = (action == "ban")
+        message = f"Kullanıcı '{username}' başarıyla {'yasaklandı' if action == 'ban' else 'yasağı kaldırıldı'}."
+        
+    elif action == "delete":
+        if not user_data:
+            raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+            
+        db["users"] = [u for u in db["users"] if u["username"] != username]
+        message = f"Kullanıcı '{username}' başarıyla silindi."
+        
+    else:
+        raise HTTPException(status_code=400, detail="Geçersiz işlem.")
+
+    db_manager.save_db(db)
+    return JSONResponse({"status": "success", "message": message})
+
+@app.get("/api/admin/chat_history/{username}")
+async def get_user_chat_history_admin(username: str, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Bu geçmişi sadece Super Admin görüntüleyebilir.")
+    
+    db = db_manager.load_db()
+    user_data = next((u for u in db["users"] if u["username"] == username), None)
+
+    if not user_data:
+        raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı.")
+
+    return JSONResponse({"history": user_data["chat_history"]})
+
+@app.post("/api/anime/producer_action")
+async def anime_producer_action(prompt: str = Form(...), current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ["admin", "super_admin"]:
+        raise HTTPException(status_code=403, detail="Bu özelliği sadece Admin/Super Admin kullanabilir.")
+
+    # Simüle edilmiş AI yanıtı
+    if not AI_ENABLED:
+        return JSONResponse({
+            "status": "success",
+            "result": f"AI devre dışı. Simülasyon: '{prompt}' konusu için anime konsepti oluşturulmuştur.\n\nKarakter Adı: Kage (Gölge)\nTür: Cyberpunk Samuray\nPlot: Kage'nin 2077 yılında yapay zeka tarafından kontrol edilen bir distopyadaki son katana ustası olarak mücadelesi.",
+            "message": "AI devre dışı olduğu için simülasyon sonucu döndürüldü."
+        })
+
+    try:
+        system_prompt = "Sen bir anime yapımcısısın. Kullanıcının verdiği kısa konuyu alarak, o konuya uygun 300 kelimelik kısa bir anime serisi özeti, ana karakter ismi ve serinin tarzını (Örn: Mecha, Fantazi, Cyberpunk) oluştur."
+        
+        # Bu AI çağrısı, Chat API'sine benzer şekilde çalışır ancak tek seferliktir
+        response = ai_assistant.client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                {"role": "system", "parts": [{"text": system_prompt}]},
+                {"role": "user", "parts": [{"text": prompt}]}
+            ]
+        )
+        return JSONResponse({"status": "success", "result": response.text})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI Üretim Hatası: {e}")
+
+@app.post("/api/minecraft/botnet_command")
+async def minecraft_botnet_command(command: str = Form(...), target: str = Form(...), current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ["admin", "super_admin"]:
+        raise HTTPException(status_code=403, detail="Bu özelliği sadece Admin/Super Admin kullanabilir.")
+
+    # Komut simülasyonu
+    if command == "ping":
+        message = f"Simülasyon: Ping komutu '{target}' hedefine başarıyla gönderildi. Yanıt süresi: 45ms."
+    elif command == "attack":
+        message = f"Simülasyon: DDoS Saldırısı '{target}' hedefine 10.000 Bot ile BAŞLATILDI. Lütfen logları kontrol edin."
+    elif command == "stop":
+        message = "Simülasyon: Devam eden tüm BotNet saldırıları başarıyla DURDURULDU."
+    else:
+        raise HTTPException(status_code=400, detail="Geçersiz botnet komutu.")
+
+    return JSONResponse({"status": "success", "message": message})
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
     html_content = """
 <!DOCTYPE html>
 <html lang="tr">
