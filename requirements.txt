@@ -2,6 +2,6 @@ fastapi
 uvicorn[standard]
 pydantic
 python-jose[cryptography]
-passlib[bcrypt]
+passlib[bcrypt]==1.7.4  <-- Uyumlu sürüm
 google-genai
 requests
