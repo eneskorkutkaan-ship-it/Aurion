@@ -1,8 +1,7 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
-passlib
-python-jose
-python-multipart
-bcrypt==4.1.2 
+python-jose[cryptography]
+passlib[bcrypt]
 google-genai
+requests
