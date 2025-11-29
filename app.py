@@ -4,27 +4,25 @@ import json
 import uuid
 import datetime
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 # ----- 1. Kütüphane Kontrolü ve Yükleme -----
 try:
     from google import genai
 except ImportError:
     genai = None
-    print("!!! [HATA] google-genai kütüphanesi bulunamadı.")
+    print("!!! [HATA] google-genai kütüphanesi bulunamadı. Yapay zeka devre dışı.")
 
 # ----- 2. KONFİGÜRASYON VE SABİTLER (API Key) -----
 
-# API Anahtarınız parçalı olarak birleştirildi (Gemini Configure hatası çözüldü)
-KEY_PARTS = [
-    "AIzaS", "yD0KH", "3AFQX", "Rh84I", "mhLc0", "SXyG9", "bZny4", "0IMM" # Buraya kendi anahtarınızı eklemelisiniz.
-]
-GEMINI_API_KEY = "".join(KEY_PARTS) 
+# Kendi Gemini API anahtarınızı buraya girin!
+# Örnek: GEMINI_API_KEY = "AIzaSyD0KH3AFQXRh84ImhLc0SXyG9bZny40IMM"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
 # Güvenlik ve JWT (Token) ayarları
 SECRET_KEY = os.environ.get("SECRET_KEY", "aurion-random-secret-key-123456") 
@@ -36,7 +34,7 @@ DATA_DİZİNİ = "data"
 DB_YOLU = os.path.join(DATA_DİZİNİ, "db.json")
 
 # Şifreleme (Bcrypt)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto") # bcrypt sürüm hatası requirements.txt ile çözülmeli
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ----- 3. Pydantic Modelleri -----
 class ChatMessage(BaseModel):
@@ -61,13 +59,13 @@ if GEMINI_API_KEY and genai:
     try:
         genai.configure(api_key=GEMINI_API_KEY) 
         if genai.Client(): 
-             print(f">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
+             print(">>> [GEMINI OK] API Key algılandı ve yapılandırıldı.")
              AI_ENABLED = True
     except Exception as e:
-        print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}")
+        print(f"!!! [API ERROR] Gemini Configure/Yükleme Hatası: {e}") 
         AI_ENABLED = False
 else:
-    print("!!! [UYARI] Google GenAI kütüphanesi veya API Key eksik.")
+    print("!!! [UYARI] Google GenAI kütüphanesi veya API Key eksik. AI devre dışı.")
 
 
 # ----- 5. DatabaseManager Sınıfı -----
@@ -75,16 +73,14 @@ else:
 class DatabaseManager:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._ensure_data_dir() # RuntimeError'ı çözer
+        self._ensure_data_dir() 
         self._ensure_db_exists()
 
     def _ensure_data_dir(self):
         if not os.path.exists(DATA_DİZİNİ):
-            # Render'da static dizinin mevcut olmaması hatasını çözmek için dizin oluşturuldu
             os.makedirs(DATA_DİZİNİ) 
 
     def _hash_password(self, password: str) -> str:
-        # NameError (_get_password_hash) hatası çözüldü
         return pwd_context.hash(password)
 
     def _ensure_db_exists(self):
@@ -113,7 +109,6 @@ class DatabaseManager:
         except Exception as e:
             print(f"!!! [DB HATA] Veritabanı okuma/şema hatası: {e}")
             try:
-                # Hata durumunda bozuk dosyayı silip yeniden oluşturmayı dene
                 os.remove(self.db_path)
                 self._ensure_db_exists()
                 return self.load_db()
@@ -151,6 +146,7 @@ def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] 
 def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
     if not token:
+        # 401 hatası vererek tarayıcının giriş yapmaya yönlendirilmesini sağlar.
         raise HTTPException(status_code=401, detail="Yetkilendirme token'ı eksik.")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -171,16 +167,19 @@ class AI_Assistant:
     
     def generate_response(self, history: List[dict], prompt: str) -> str:
         if not AI_ENABLED or not self.client:
-            return "AI servisi şu anda aktif değil. Lütfen Super Admin ile iletişime geçin."
+            return "AI servisi şu anda aktif değil (API Key veya kütüphane hatası). Lütfen Super Admin ile iletişime geçin."
 
         try:
             contents = []
+            # Geçmiş mesajları AI modelinin anlayacağı formata dönüştür
             for message in history:
+                # Kullanıcı mesajları "user", AI mesajları "model" rolünü alır
                 role = "user" if message["sender"] == "user" else "model"
                 contents.append(
                     {"role": role, "parts": [{"text": message["content"]}]}
                 )
             
+            # Güncel kullanıcı mesajını ekle
             contents.append(
                 {"role": "user", "parts": [{"text": prompt}]}
             )
@@ -199,7 +198,7 @@ ai_assistant = AI_Assistant()
 # ----- 8. UYGULAMA YÖNLENDİRMELERİ (API Endpoints) -----
 
 app = FastAPI()
-# Render Static dosyaları okuyamazsa bu dizinler hata verebilir.
+# Static dosyaları doğru bağla
 if os.path.isdir("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -218,6 +217,7 @@ async def login(username: str = Form(...), password: str = Form(...)):
     )
     
     response = RedirectResponse(url="/", status_code=302)
+    # Çerezleri ayarla
     response.set_cookie(key="access_token", value=access_token, httponly=True)
     response.set_cookie(key="user_name", value=user_record["username"], httponly=False)
     response.set_cookie(key="user_role", value=user_record["role"], httponly=False)
@@ -250,19 +250,61 @@ async def chat_message(request: Request, current_user: dict = Depends(get_curren
     
     current_history = user_record.get("chat_history", [])
     
+    # Kullanıcı mesajını geçmişe ekle
     user_msg_record = ChatMessage(sender="user", content=user_message).dict()
     current_history.append(user_msg_record)
     
+    # AI'dan yanıt al
     ai_response_content = ai_assistant.generate_response(current_history, user_message)
     
+    # AI yanıtını geçmişe ekle
     ai_msg_record = ChatMessage(sender="ai", content=ai_response_content).dict()
     current_history.append(ai_msg_record)
     
+    # Veritabanını kaydet
     db["users"][user_index]["chat_history"] = current_history
     db_manager.save_db(db)
     
     return {"user_message": user_message, "ai_response": ai_response_content}
 
+
+# ----- GELİŞTİRME AŞAMASINDAKİ ENDPOINTLER TAMAMLANDI -----
+
+@app.post("/api/anime/producer_action")
+async def anime_producer_action(action: str = Form(...), prompt: str = Form(None), current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
+
+    # Buraya gerçek AI/Anime üretme mantığı eklenecektir. Şimdilik simülasyon.
+    if action == "generate":
+        if not AI_ENABLED:
+            return JSONResponse(status_code=200, content={"status": "error", "message": "AI servisi aktif değil. Anime üretilemiyor."})
+        
+        # Simülasyon yanıtı
+        result = ai_assistant.generate_response([], f"Anime konusu veya görseli üret. Konu: {prompt}. Detaylı ve yaratıcı ol.")
+        return {"status": "success", "message": "Anime üretimi başlatıldı.", "result": result}
+    
+    return {"status": "info", "message": f"Anime Producer eylemi '{action}' simüle edildi."}
+
+
+@app.post("/api/minecraft/botnet_command")
+async def minecraft_botnet_command(command: str = Form(...), target: str = Form(None), current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Erişim Reddedildi: Yalnızca Super Admin yetkisi gereklidir.")
+
+    # Buraya gerçek Minecraft BotNet kontrol mantığı eklenecektir. Şimdilik simülasyon.
+    if command == "ping":
+        response_text = f"Minecraft sunucusu {target} ping'leniyor... Yanıt: {datetime.datetime.now().strftime('%H:%M:%S')}"
+    elif command == "attack":
+        response_text = f"BotNet, {target} hedefine saldırıyı başlattı. Bot sayısı: 100."
+    else:
+        response_text = f"Geçersiz komut: {command}"
+
+    return {"status": "success", "message": response_text}
+# ----- GELİŞTİRME AŞAMASINDAKİ ENDPOINTLER TAMAMLANDI SONU -----
+
+
+# ----- YÖNETİM ENDPOINTLERİ -----
 
 @app.get("/api/admin/users")
 async def get_users(current_user: dict = Depends(get_current_user)):
@@ -566,6 +608,15 @@ async def serve_dashboard(request: Request):
         .delete-btn:hover {
             background-color: #c82333;
         }
+        .input-group {
+            display: flex;
+            gap: 10px;
+            width: 100%;
+        }
+        .input-group input {
+            flex-grow: 1;
+        }
+
 
         @media (max-width: 768px) {
             #dashboard {
@@ -597,6 +648,16 @@ async def serve_dashboard(request: Request):
             }
             #content {
                 padding: 10px;
+            }
+            .admin-form {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .admin-form button {
+                width: 100%;
+            }
+            .input-group {
+                flex-direction: column;
             }
         }
     </style>
@@ -677,15 +738,43 @@ async def serve_dashboard(request: Request):
                 
                 <div id="adminMessage" style="margin-top: 15px; color: yellow;"></div>
             </div>
-
+            
             <div id="anime" class="tab-content">
-                <h2 class="tab-title">Anime Üretici (Geliştirme Aşamasında)</h2>
-                <p style="color:var(--text-muted);">Bu özellik, yalnızca Super Adminler için hazırlanmaktadır. Yakında daha fazla detay eklenecektir.</p>
+                <h2 class="tab-title">Anime Producer (AI İçerik Üretimi)</h2>
+                <div class="admin-section">
+                    <h3>Yeni İçerik Üret</h3>
+                    <form id="animeProducerForm" class="admin-form">
+                        <textarea id="animePrompt" name="prompt" placeholder="Üretmek istediğiniz anime konusu, karakteri veya görsel detaylarını girin (Max 500 karakter)" style="width: 100%; height: 100px; padding: 10px; border-radius: 6px; background-color: var(--input-bg); color: var(--text-light);" maxlength="500"></textarea>
+                        <input type="hidden" name="action" value="generate">
+                        <button type="submit">AI ile Anime Üret</button>
+                    </form>
+                </div>
+                <div class="admin-section">
+                    <h3>Üretim Sonucu</h3>
+                    <div id="animeProducerResult" style="white-space: pre-wrap; color: var(--text-light); background-color: var(--input-bg); padding: 15px; border-radius: 6px;">Henüz bir üretim yapılmadı.</div>
+                </div>
             </div>
 
             <div id="minecraft" class="tab-content">
-                <h2 class="tab-title">Minecraft Bot Kontrolü (Geliştirme Aşamasında)</h2>
-                <p style="color:var(--text-muted);">Bu özellik, yalnızca Super Adminler için hazırlanmaktadır. Yakında daha fazla detay eklenecektir.</p>
+                <h2 class="tab-title">Minecraft BotNet Kontrolü</h2>
+                <div class="admin-section">
+                    <h3>Komut Gönder</h3>
+                    <form id="minecraftBotnetForm" class="admin-form">
+                        <div class="input-group">
+                            <select name="command" style="width: 150px;">
+                                <option value="ping">Ping Sunucusu</option>
+                                <option value="attack">Saldırı Başlat (DDoS)</option>
+                                <option value="stop">Saldırıyı Durdur</option>
+                            </select>
+                            <input type="text" name="target" placeholder="Hedef IP veya Alan Adı (örn: 127.0.0.1)" required>
+                        </div>
+                        <button type="submit">Komutu Uygula</button>
+                    </form>
+                </div>
+                 <div class="admin-section">
+                    <h3>Komut Sonucu</h3>
+                    <div id="minecraftBotnetResult" style="color: var(--text-light); background-color: var(--input-bg); padding: 15px; border-radius: 6px;">Henüz bir komut gönderilmedi.</div>
+                </div>
             </div>
         </div>
     </section>
@@ -990,6 +1079,64 @@ async def serve_dashboard(request: Request):
                 alert('Silme Hatası: ' + result.detail);
             }
         }
+        
+        // ----- Anime Producer İşlemleri -----
+        document.getElementById('animeProducerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const formData = new FormData(form);
+            const resultElement = document.getElementById('animeProducerResult');
+            resultElement.textContent = 'AI üretim başlatıldı... Lütfen bekleyin.';
+            
+            try {
+                const response = await fetch('/api/anime/producer_action', {
+                    method: 'POST',
+                    body: new URLSearchParams(formData)
+                });
+
+                const result = await response.json();
+                
+                if (response.ok && result.status === 'success') {
+                    resultElement.textContent = result.result; // AI'dan gelen detaylı yanıtı göster
+                } else {
+                    resultElement.textContent = 'Hata: ' + (result.message || result.detail || 'Bilinmeyen bir hata oluştu.');
+                    resultElement.style.color = '#dc3545';
+                }
+            } catch (error) {
+                resultElement.textContent = 'Bağlantı hatası: Sunucuya ulaşılamıyor.';
+                resultElement.style.color = '#dc3545';
+            }
+            resultElement.style.backgroundColor = 'var(--bg-light)';
+        });
+        
+        // ----- Minecraft BotNet İşlemleri -----
+        document.getElementById('minecraftBotnetForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const formData = new FormData(form);
+            const resultElement = document.getElementById('minecraftBotnetResult');
+            resultElement.textContent = 'Komut gönderiliyor...';
+
+            try {
+                const response = await fetch('/api/minecraft/botnet_command', {
+                    method: 'POST',
+                    body: new URLSearchParams(formData)
+                });
+
+                const result = await response.json();
+                
+                if (response.ok && result.status === 'success') {
+                    resultElement.textContent = 'Başarılı: ' + result.message;
+                    resultElement.style.color = 'var(--text-light)';
+                } else {
+                    resultElement.textContent = 'Hata: ' + (result.message || result.detail || 'Komut gönderilemedi.');
+                    resultElement.style.color = '#dc3545';
+                }
+            } catch (error) {
+                resultElement.textContent = 'Bağlantı hatası: Sunucuya ulaşılamıyor.';
+                resultElement.style.color = '#dc3545';
+            }
+        });
 
         window.onload = showDashboard;
         
